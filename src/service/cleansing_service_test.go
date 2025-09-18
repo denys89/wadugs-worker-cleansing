@@ -4,11 +4,44 @@ import (
 	"context"
 	"testing"
 	"github.com/denys89/wadugs-worker-cleansing/src/dto"
+	"github.com/denys89/wadugs-worker-cleansing/src/entity"
 )
+
+// Mock contractor repository for testing
+type mockContractorRepository struct{}
+
+func (m *mockContractorRepository) GetByID(ctx context.Context, id int64) (*entity.Contractor, error) {
+	return &entity.Contractor{
+		Id:            id,
+		Name:          "Test Contractor",
+		AwsBucketName: "test-bucket",
+	}, nil
+}
+
+func (m *mockContractorRepository) Delete(ctx context.Context, id int64) error {
+	return nil
+}
+
+func (m *mockContractorRepository) Create(ctx context.Context, contractor *entity.Contractor) error {
+	return nil
+}
+
+func (m *mockContractorRepository) Update(ctx context.Context, contractor *entity.Contractor) error {
+	return nil
+}
+
+func (m *mockContractorRepository) GetAll(ctx context.Context) (entity.Contractors, error) {
+	return entity.Contractors{}, nil
+}
+
+func (m *mockContractorRepository) GetByStatus(ctx context.Context, status int8) (entity.Contractors, error) {
+	return entity.Contractors{}, nil
+}
 
 func TestCleansingService_ProcessCleansingMessage(t *testing.T) {
 	s3Service := NewNullS3Service()
-	service := NewCleansingService(s3Service)
+	contractorRepo := &mockContractorRepository{}
+	service := NewCleansingService(s3Service, contractorRepo)
 
 	tests := []struct {
 		name    string
@@ -122,7 +155,8 @@ func TestCleansingService_ValidEntityID(t *testing.T) {
 
 func TestCleansingService_ErrorHandling(t *testing.T) {
 	s3Service := NewNullS3Service()
-	service := NewCleansingService(s3Service)
+	contractorRepo := &mockContractorRepository{}
+	service := NewCleansingService(s3Service, contractorRepo)
 
 	ctx := context.Background()
 
@@ -142,7 +176,8 @@ func TestCleansingService_ErrorHandling(t *testing.T) {
 // Benchmark tests
 func BenchmarkCleansingService_ProcessCleansingMessage(b *testing.B) {
 	s3Service := NewNullS3Service()
-	service := NewCleansingService(s3Service)
+	contractorRepo := &mockContractorRepository{}
+	service := NewCleansingService(s3Service, contractorRepo)
 	ctx := context.Background()
 	message := dto.CleansingMessage{Type: "contractor", ID: 123}
 

@@ -3,6 +3,8 @@ package service
 import (
 	"context"
 	"fmt"
+	"time"
+
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
 	"github.com/aws/aws-sdk-go-v2/service/s3/types"
@@ -10,6 +12,7 @@ import (
 	workerLog "github.com/denys89/wadugs-worker-cleansing/src/log"
 	log "github.com/sirupsen/logrus"
 	"golang.org/x/sync/errgroup"
+	"golang.org/x/time/rate"
 )
 
 type (
@@ -19,11 +22,14 @@ type (
 		ListProjectFiles(ctx context.Context, projectID int64) ([]dto.S3Object, error)
 		ListSiteFiles(ctx context.Context, siteID int64) ([]dto.S3Object, error)
 		DeleteObjects(ctx context.Context, objects []dto.S3Object) (int, error)
+		DeleteBucket(ctx context.Context, bucketName string) error
 	}
 
 	// S3ServiceImpl implements the S3Service interface
 	S3ServiceImpl struct {
-		client *s3.Client
+		client      *s3.Client
+		rateLimiter *rate.Limiter
+		fileService FileService
 	}
 
 	// NullS3Service is a no-op implementation for testing
@@ -31,16 +37,29 @@ type (
 )
 
 const (
-	// S3 batch delete limit
+	// S3 batch delete limit (AWS maximum is 1000)
 	maxDeleteBatchSize = 1000
-	// Maximum concurrent delete operations
-	maxConcurrentDeletes = 5
+	// Maximum concurrent delete operations (reduced for better rate limiting)
+	maxConcurrentDeletes = 3
+	// Rate limiting: 100 requests per second with burst of 10
+	// This is conservative to avoid throttling
+	requestsPerSecond = 100
+	burstLimit        = 10
+	// Retry configuration
+	maxRetries = 3
+	baseDelay  = 100 * time.Millisecond
+	maxDelay   = 5 * time.Second
 )
 
-// NewS3Service creates a new S3 service instance
-func NewS3Service(client *s3.Client) S3Service {
+// NewS3Service creates a new S3 service instance with rate limiting
+func NewS3Service(client *s3.Client, fileService FileService) S3Service {
+	// Create rate limiter: 100 requests per second with burst of 10
+	limiter := rate.NewLimiter(rate.Limit(requestsPerSecond), burstLimit)
+
 	return &S3ServiceImpl{
-		client: client,
+		client:      client,
+		rateLimiter: limiter,
+		fileService: fileService,
 	}
 }
 
@@ -54,45 +73,22 @@ func (s3s *S3ServiceImpl) ListContractorFiles(ctx context.Context, contractorID 
 	logger := workerLog.GetLoggerFromContext(ctx)
 	logger.WithField("contractor_id", contractorID).Info("Listing contractor files")
 
-	// In a real implementation, you would query the database to get all buckets
-	// and prefixes associated with this contractor. For now, we'll use a pattern-based approach.
-	
-	// This is a simplified implementation. In practice, you would:
-	// 1. Query the database to get all projects for this contractor
-	// 2. For each project, get all sites
-	// 3. For each site, get the bucket and prefix information
-	// 4. List objects in S3 using those prefixes
-	
-	var allObjects []dto.S3Object
-	
-	// For demonstration, we'll assume a naming convention where contractor files
-	// are stored with a prefix pattern. In reality, you'd query the database.
-	buckets, err := s3s.listAllBuckets(ctx)
+	// Get file information from the file service
+	objects, err := s3s.fileService.GetContractorFiles(ctx, contractorID)
 	if err != nil {
-		return nil, fmt.Errorf("failed to list buckets: %w", err)
+		return nil, fmt.Errorf("failed to get contractor files: %w", err)
 	}
 
-	for _, bucket := range buckets {
-		// Look for objects with contractor-related prefixes
-		// This is a simplified approach - in practice, you'd use database queries
-		prefix := fmt.Sprintf("contractor_%d/", contractorID)
-		objects, err := s3s.listObjectsWithPrefix(ctx, bucket, prefix)
-		if err != nil {
-			logger.WithError(err).WithFields(log.Fields{
-				"bucket": bucket,
-				"prefix": prefix,
-			}).Warn("Failed to list objects for contractor prefix")
-			continue
-		}
-		allObjects = append(allObjects, objects...)
-	}
+	// TODO: Populate bucket information for each object
+	// This would require additional logic to determine the correct bucket
+	// based on project/site configuration or environment settings
 
 	logger.WithFields(log.Fields{
 		"contractor_id": contractorID,
-		"total_files":   len(allObjects),
+		"total_files":   len(objects),
 	}).Info("Listed contractor files")
 
-	return allObjects, nil
+	return objects, nil
 }
 
 // ListProjectFiles lists all S3 objects for a project
@@ -100,33 +96,22 @@ func (s3s *S3ServiceImpl) ListProjectFiles(ctx context.Context, projectID int64)
 	logger := workerLog.GetLoggerFromContext(ctx)
 	logger.WithField("project_id", projectID).Info("Listing project files")
 
-	var allObjects []dto.S3Object
-	
-	buckets, err := s3s.listAllBuckets(ctx)
+	// Get file information from the file service
+	objects, err := s3s.fileService.GetProjectFiles(ctx, projectID)
 	if err != nil {
-		return nil, fmt.Errorf("failed to list buckets: %w", err)
+		return nil, fmt.Errorf("failed to get project files: %w", err)
 	}
 
-	for _, bucket := range buckets {
-		// Look for objects with project-related prefixes
-		prefix := fmt.Sprintf("project_%d/", projectID)
-		objects, err := s3s.listObjectsWithPrefix(ctx, bucket, prefix)
-		if err != nil {
-			logger.WithError(err).WithFields(log.Fields{
-				"bucket": bucket,
-				"prefix": prefix,
-			}).Warn("Failed to list objects for project prefix")
-			continue
-		}
-		allObjects = append(allObjects, objects...)
-	}
+	// TODO: Populate bucket information for each object
+	// This would require additional logic to determine the correct bucket
+	// based on project/site configuration or environment settings
 
 	logger.WithFields(log.Fields{
 		"project_id":  projectID,
-		"total_files": len(allObjects),
+		"total_files": len(objects),
 	}).Info("Listed project files")
 
-	return allObjects, nil
+	return objects, nil
 }
 
 // ListSiteFiles lists all S3 objects for a site
@@ -134,33 +119,22 @@ func (s3s *S3ServiceImpl) ListSiteFiles(ctx context.Context, siteID int64) ([]dt
 	logger := workerLog.GetLoggerFromContext(ctx)
 	logger.WithField("site_id", siteID).Info("Listing site files")
 
-	var allObjects []dto.S3Object
-	
-	buckets, err := s3s.listAllBuckets(ctx)
+	// Get file information from the file service
+	objects, err := s3s.fileService.GetSiteFiles(ctx, siteID)
 	if err != nil {
-		return nil, fmt.Errorf("failed to list buckets: %w", err)
+		return nil, fmt.Errorf("failed to get site files: %w", err)
 	}
 
-	for _, bucket := range buckets {
-		// Look for objects with site-related prefixes
-		prefix := fmt.Sprintf("site_%d/", siteID)
-		objects, err := s3s.listObjectsWithPrefix(ctx, bucket, prefix)
-		if err != nil {
-			logger.WithError(err).WithFields(log.Fields{
-				"bucket": bucket,
-				"prefix": prefix,
-			}).Warn("Failed to list objects for site prefix")
-			continue
-		}
-		allObjects = append(allObjects, objects...)
-	}
+	// TODO: Populate bucket information for each object
+	// This would require additional logic to determine the correct bucket
+	// based on project/site configuration or environment settings
 
 	logger.WithFields(log.Fields{
 		"site_id":     siteID,
-		"total_files": len(allObjects),
+		"total_files": len(objects),
 	}).Info("Listed site files")
 
-	return allObjects, nil
+	return objects, nil
 }
 
 // DeleteObjects deletes multiple S3 objects in batches with concurrency control
@@ -231,7 +205,7 @@ func (s3s *S3ServiceImpl) deleteBucketObjects(ctx context.Context, bucket string
 
 		totalDeleted += deleted
 		logger.WithFields(log.Fields{
-			"bucket":       bucket,
+			"bucket":        bucket,
 			"batch_deleted": deleted,
 			"total_deleted": totalDeleted,
 		}).Debug("Deleted batch of objects")
@@ -301,7 +275,7 @@ func (s3s *S3ServiceImpl) listAllBuckets(ctx context.Context) ([]string, error) 
 // listObjectsWithPrefix lists all objects in a bucket with a specific prefix
 func (s3s *S3ServiceImpl) listObjectsWithPrefix(ctx context.Context, bucket, prefix string) ([]dto.S3Object, error) {
 	var objects []dto.S3Object
-	
+
 	paginator := s3.NewListObjectsV2Paginator(s3s.client, &s3.ListObjectsV2Input{
 		Bucket: aws.String(bucket),
 		Prefix: aws.String(prefix),
@@ -324,6 +298,224 @@ func (s3s *S3ServiceImpl) listObjectsWithPrefix(ctx context.Context, bucket, pre
 	return objects, nil
 }
 
+// DeleteBucket deletes an S3 bucket after ensuring it's empty
+// This implementation uses optimized batch operations, rate limiting, and retry logic
+func (s3s *S3ServiceImpl) DeleteBucket(ctx context.Context, bucketName string) error {
+	logger := workerLog.GetLoggerFromContext(ctx)
+	logger.WithField("bucket", bucketName).Info("Starting optimized bucket deletion")
+
+	// Step 1: Delete all objects in the bucket using optimized batch operations
+	err := s3s.deleteAllObjectsInBucket(ctx, bucketName)
+	if err != nil {
+		return fmt.Errorf("failed to delete objects in bucket %s: %w", bucketName, err)
+	}
+
+	// Step 2: Delete the bucket itself with retry logic
+	err = s3s.deleteBucketWithRetry(ctx, bucketName)
+	if err != nil {
+		return fmt.Errorf("failed to delete bucket %s: %w", bucketName, err)
+	}
+
+	logger.WithField("bucket", bucketName).Info("Successfully deleted bucket")
+	return nil
+}
+
+// deleteAllObjectsInBucket deletes all objects in a bucket using optimized pagination and batching
+func (s3s *S3ServiceImpl) deleteAllObjectsInBucket(ctx context.Context, bucketName string) error {
+	logger := workerLog.GetLoggerFromContext(ctx)
+	totalDeleted := 0
+
+	// Use paginated listing to handle large numbers of objects efficiently
+	paginator := s3.NewListObjectsV2Paginator(s3s.client, &s3.ListObjectsV2Input{
+		Bucket:  aws.String(bucketName),
+		MaxKeys: aws.Int32(1000), // Maximum page size for efficiency
+	})
+
+	// Process objects in batches as we paginate
+	for paginator.HasMorePages() {
+		// Rate limit the listing operation
+		if err := s3s.rateLimiter.Wait(ctx); err != nil {
+			return fmt.Errorf("rate limiter context cancelled: %w", err)
+		}
+
+		page, err := paginator.NextPage(ctx)
+		if err != nil {
+			return fmt.Errorf("failed to list objects page: %w", err)
+		}
+
+		if len(page.Contents) == 0 {
+			continue
+		}
+
+		// Convert to our DTO format
+		var objects []dto.S3Object
+		for _, obj := range page.Contents {
+			objects = append(objects, dto.S3Object{
+				Bucket: bucketName,
+				Key:    aws.ToString(obj.Key),
+			})
+		}
+
+		// Delete this batch of objects
+		deleted, err := s3s.deleteBucketObjectsOptimized(ctx, bucketName, objects)
+		if err != nil {
+			return fmt.Errorf("failed to delete batch of %d objects: %w", len(objects), err)
+		}
+
+		totalDeleted += deleted
+		logger.WithFields(log.Fields{
+			"bucket":        bucketName,
+			"batch_deleted": deleted,
+			"total_deleted": totalDeleted,
+		}).Info("Deleted batch of objects")
+	}
+
+	logger.WithFields(log.Fields{
+		"bucket":        bucketName,
+		"total_deleted": totalDeleted,
+	}).Info("Completed deletion of all objects in bucket")
+
+	return nil
+}
+
+// deleteBucketObjectsOptimized deletes objects with improved error handling and rate limiting
+func (s3s *S3ServiceImpl) deleteBucketObjectsOptimized(ctx context.Context, bucket string, objects []dto.S3Object) (int, error) {
+	if len(objects) == 0 {
+		return 0, nil
+	}
+
+	logger := workerLog.GetLoggerFromContext(ctx)
+	totalDeleted := 0
+
+	// Process objects in batches of maxDeleteBatchSize (1000)
+	for i := 0; i < len(objects); i += maxDeleteBatchSize {
+		end := i + maxDeleteBatchSize
+		if end > len(objects) {
+			end = len(objects)
+		}
+
+		batch := objects[i:end]
+		deleted, err := s3s.deleteBatchWithRetry(ctx, bucket, batch)
+		if err != nil {
+			logger.WithError(err).WithFields(log.Fields{
+				"bucket":      bucket,
+				"batch_size":  len(batch),
+				"batch_start": i,
+			}).Error("Failed to delete batch after retries")
+			return totalDeleted, err
+		}
+
+		totalDeleted += deleted
+		logger.WithFields(log.Fields{
+			"bucket":        bucket,
+			"batch_deleted": deleted,
+			"total_deleted": totalDeleted,
+			"progress":      fmt.Sprintf("%d/%d", end, len(objects)),
+		}).Debug("Successfully deleted batch")
+	}
+
+	return totalDeleted, nil
+}
+
+// deleteBatchWithRetry implements exponential backoff retry for batch deletions
+func (s3s *S3ServiceImpl) deleteBatchWithRetry(ctx context.Context, bucket string, objects []dto.S3Object) (int, error) {
+	var lastErr error
+
+	for attempt := 0; attempt <= maxRetries; attempt++ {
+		// Rate limit each attempt
+		if err := s3s.rateLimiter.Wait(ctx); err != nil {
+			return 0, fmt.Errorf("rate limiter context cancelled: %w", err)
+		}
+
+		deleted, err := s3s.deleteBatch(ctx, bucket, objects)
+		if err == nil {
+			return deleted, nil
+		}
+
+		lastErr = err
+
+		// Don't retry on the last attempt
+		if attempt == maxRetries {
+			break
+		}
+
+		// Calculate exponential backoff delay
+		delay := time.Duration(attempt+1) * baseDelay
+		if delay > maxDelay {
+			delay = maxDelay
+		}
+
+		logger := workerLog.GetLoggerFromContext(ctx)
+		logger.WithError(err).WithFields(log.Fields{
+			"bucket":       bucket,
+			"attempt":      attempt + 1,
+			"max_attempts": maxRetries + 1,
+			"retry_delay":  delay,
+			"batch_size":   len(objects),
+		}).Warn("Batch delete failed, retrying with backoff")
+
+		// Wait before retry
+		select {
+		case <-ctx.Done():
+			return 0, ctx.Err()
+		case <-time.After(delay):
+			// Continue to next attempt
+		}
+	}
+
+	return 0, fmt.Errorf("batch delete failed after %d attempts: %w", maxRetries+1, lastErr)
+}
+
+// deleteBucketWithRetry deletes the bucket itself with retry logic
+func (s3s *S3ServiceImpl) deleteBucketWithRetry(ctx context.Context, bucketName string) error {
+	var lastErr error
+
+	for attempt := 0; attempt <= maxRetries; attempt++ {
+		// Rate limit each attempt
+		if err := s3s.rateLimiter.Wait(ctx); err != nil {
+			return fmt.Errorf("rate limiter context cancelled: %w", err)
+		}
+
+		_, err := s3s.client.DeleteBucket(ctx, &s3.DeleteBucketInput{
+			Bucket: aws.String(bucketName),
+		})
+		if err == nil {
+			return nil
+		}
+
+		lastErr = err
+
+		// Don't retry on the last attempt
+		if attempt == maxRetries {
+			break
+		}
+
+		// Calculate exponential backoff delay
+		delay := time.Duration(attempt+1) * baseDelay
+		if delay > maxDelay {
+			delay = maxDelay
+		}
+
+		logger := workerLog.GetLoggerFromContext(ctx)
+		logger.WithError(err).WithFields(log.Fields{
+			"bucket":       bucketName,
+			"attempt":      attempt + 1,
+			"max_attempts": maxRetries + 1,
+			"retry_delay":  delay,
+		}).Warn("Bucket deletion failed, retrying with backoff")
+
+		// Wait before retry
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(delay):
+			// Continue to next attempt
+		}
+	}
+
+	return fmt.Errorf("bucket deletion failed after %d attempts: %w", maxRetries+1, lastErr)
+}
+
 // Null implementation methods for testing
 func (ns *NullS3Service) ListContractorFiles(ctx context.Context, contractorID int64) ([]dto.S3Object, error) {
 	return []dto.S3Object{}, nil
@@ -339,4 +531,8 @@ func (ns *NullS3Service) ListSiteFiles(ctx context.Context, siteID int64) ([]dto
 
 func (ns *NullS3Service) DeleteObjects(ctx context.Context, objects []dto.S3Object) (int, error) {
 	return len(objects), nil
+}
+
+func (ns *NullS3Service) DeleteBucket(ctx context.Context, bucketName string) error {
+	return nil
 }

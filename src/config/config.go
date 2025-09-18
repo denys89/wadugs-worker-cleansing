@@ -20,6 +20,13 @@ type Config struct {
 	AWSRegion          string `envconfig:"AWS_REGION" default:"ap-southeast-1"`
 	AWSAccessKeyID     string `envconfig:"AWS_ACCESS_KEY_ID" default:"key" required:"true"`
 	AWSSecretAccessKey string `envconfig:"AWS_SECRET_ACCESS_KEY" default:"secret" required:"true"`
+
+	// Database Configuration
+	DBHost     string `envconfig:"DB_HOST" default:"localhost"`
+	DBPort     string `envconfig:"DB_PORT" default:"4306"`
+	DBUser     string `envconfig:"DB_USER" default:"root"`
+	DBPassword string `envconfig:"DB_PASSWORD" default:"password12345"`
+	DBName     string `envconfig:"DB_NAME" default:"wadugsapp"`
 }
 
 // Get ...

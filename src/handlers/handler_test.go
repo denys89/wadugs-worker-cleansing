@@ -78,9 +78,17 @@ func (m *mockS3Service) ListSiteFiles(ctx context.Context, siteID int64) ([]dto.
 
 func (m *mockS3Service) DeleteObjects(ctx context.Context, objects []dto.S3Object) (int, error) {
 	if m.shouldError {
-		return m.deleteCount, errors.New(m.errorMsg)
+		return 0, errors.New(m.errorMsg)
 	}
 	return m.deleteCount, nil
+}
+
+// Add the missing DeleteBucket method to match the S3Service interface
+func (m *mockS3Service) DeleteBucket(ctx context.Context, bucketName string) error {
+	if m.shouldError {
+		return errors.New(m.errorMsg)
+	}
+	return nil
 }
 
 func TestMessageHandler_HandleMessage_ValidMessages(t *testing.T) {

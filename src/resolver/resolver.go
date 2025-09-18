@@ -8,14 +8,18 @@ import (
 	"github.com/aws/aws-sdk-go-v2/credentials"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
 	workerConfig "github.com/denys89/wadugs-worker-cleansing/src/config"
+	"github.com/denys89/wadugs-worker-cleansing/src/database"
+	"github.com/denys89/wadugs-worker-cleansing/src/repository"
 	"github.com/denys89/wadugs-worker-cleansing/src/service"
 	log "github.com/sirupsen/logrus"
+	"gorm.io/gorm"
 )
 
 type (
 	// Resolver handles dependency injection and service initialization
 	Resolver struct {
 		config *workerConfig.Config
+		db     *gorm.DB
 	}
 )
 
@@ -23,6 +27,14 @@ type (
 func NewResolver(cfg *workerConfig.Config) *Resolver {
 	return &Resolver{
 		config: cfg,
+	}
+}
+
+// NewResolverWithDB creates a new resolver instance with database connection
+func NewResolverWithDB(cfg *workerConfig.Config, db *gorm.DB) *Resolver {
+	return &Resolver{
+		config: cfg,
+		db:     db,
 	}
 }
 
@@ -70,6 +82,48 @@ func (r *Resolver) ResolveS3Client(ctx context.Context) (*s3.Client, error) {
 	return s3Client, nil
 }
 
+// ResolveFileService creates a file service instance
+func (r *Resolver) ResolveFileService(ctx context.Context) (service.FileService, error) {
+	log.Info("Resolving file service")
+
+	// Resolve all repository dependencies
+	contractorRepo, err := r.ResolveContractorRepository(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("failed to resolve contractor repository: %w", err)
+	}
+
+	projectRepo, err := r.ResolveProjectRepository(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("failed to resolve project repository: %w", err)
+	}
+
+	siteRepo, err := r.ResolveSiteRepository(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("failed to resolve site repository: %w", err)
+	}
+
+	documentGroupRepo, err := r.ResolveDocumentGroupRepository(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("failed to resolve document group repository: %w", err)
+	}
+
+	documentRepo, err := r.ResolveDocumentRepository(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("failed to resolve document repository: %w", err)
+	}
+
+	fileRepo, err := r.ResolveFileRepository(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("failed to resolve file repository: %w", err)
+	}
+
+	// Create and return file service with all dependencies
+	fileService := service.NewFileService(contractorRepo, projectRepo, siteRepo, documentGroupRepo, documentRepo, fileRepo)
+	log.Info("File service resolved successfully")
+
+	return fileService, nil
+}
+
 // ResolveS3Service creates an S3 service instance
 func (r *Resolver) ResolveS3Service(ctx context.Context) (service.S3Service, error) {
 	log.Info("Resolving S3 service")
@@ -80,8 +134,14 @@ func (r *Resolver) ResolveS3Service(ctx context.Context) (service.S3Service, err
 		return nil, fmt.Errorf("failed to resolve S3 client: %w", err)
 	}
 
-	// Create and return S3 service
-	s3Service := service.NewS3Service(s3Client)
+	// Resolve file service dependency
+	fileService, err := r.ResolveFileService(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("failed to resolve file service: %w", err)
+	}
+
+	// Create and return S3 service with file service dependency
+	s3Service := service.NewS3Service(s3Client, fileService)
 	log.Info("S3 service resolved successfully")
 
 	return s3Service, nil
@@ -98,8 +158,15 @@ func (r *Resolver) ResolveCleansingService(ctx context.Context) service.Cleansin
 		return service.NewNullCleansingService()
 	}
 
+	// Create contractor repository
+	contractorRepo, err := r.ResolveContractorRepository(ctx)
+	if err != nil {
+		log.WithError(err).Error("Failed to resolve contractor repository, using null cleansing service")
+		return service.NewNullCleansingService()
+	}
+
 	// Create and return cleansing service
-	cleansingService := service.NewCleansingService(s3Service)
+	cleansingService := service.NewCleansingService(s3Service, contractorRepo)
 	log.Info("Cleansing service resolved successfully")
 
 	return cleansingService
@@ -163,4 +230,74 @@ func (r *Resolver) ValidateConfiguration() error {
 // GetConfig returns the resolver configuration
 func (r *Resolver) GetConfig() *workerConfig.Config {
 	return r.config
+}
+
+// ResolveDatabase creates and returns a database connection
+func (r *Resolver) ResolveDatabase(ctx context.Context) (*gorm.DB, error) {
+	if r.db != nil {
+		return r.db, nil
+	}
+
+	log.Info("Initializing database connection")
+	db, err := database.NewConnection(r.config)
+	if err != nil {
+		return nil, fmt.Errorf("failed to initialize database: %w", err)
+	}
+
+	r.db = db
+	return db, nil
+}
+
+// ResolveContractorRepository creates and returns a contractor repository
+func (r *Resolver) ResolveContractorRepository(ctx context.Context) (repository.ContractorRepository, error) {
+	db, err := r.ResolveDatabase(ctx)
+	if err != nil {
+		return nil, err
+	}
+	return repository.NewContractorRepository(db), nil
+}
+
+// ResolveProjectRepository creates and returns a project repository
+func (r *Resolver) ResolveProjectRepository(ctx context.Context) (repository.ProjectRepository, error) {
+	db, err := r.ResolveDatabase(ctx)
+	if err != nil {
+		return nil, err
+	}
+	return repository.NewProjectRepository(db), nil
+}
+
+// ResolveSiteRepository creates and returns a site repository
+func (r *Resolver) ResolveSiteRepository(ctx context.Context) (repository.SiteRepository, error) {
+	db, err := r.ResolveDatabase(ctx)
+	if err != nil {
+		return nil, err
+	}
+	return repository.NewSiteRepository(db), nil
+}
+
+// ResolveDocumentGroupRepository creates and returns a document group repository
+func (r *Resolver) ResolveDocumentGroupRepository(ctx context.Context) (repository.DocumentGroupRepository, error) {
+	db, err := r.ResolveDatabase(ctx)
+	if err != nil {
+		return nil, err
+	}
+	return repository.NewDocumentGroupRepository(db), nil
+}
+
+// ResolveDocumentRepository creates and returns a document repository
+func (r *Resolver) ResolveDocumentRepository(ctx context.Context) (repository.DocumentRepository, error) {
+	db, err := r.ResolveDatabase(ctx)
+	if err != nil {
+		return nil, err
+	}
+	return repository.NewDocumentRepository(db), nil
+}
+
+// ResolveFileRepository creates and returns a file repository
+func (r *Resolver) ResolveFileRepository(ctx context.Context) (repository.FileRepository, error) {
+	db, err := r.ResolveDatabase(ctx)
+	if err != nil {
+		return nil, err
+	}
+	return repository.NewFileRepository(db), nil
 }

@@ -3,8 +3,10 @@ package service
 import (
 	"context"
 	"fmt"
+
 	"github.com/denys89/wadugs-worker-cleansing/src/dto"
 	workerLog "github.com/denys89/wadugs-worker-cleansing/src/log"
+	"github.com/denys89/wadugs-worker-cleansing/src/repository"
 	log "github.com/sirupsen/logrus"
 )
 
@@ -19,7 +21,8 @@ type (
 
 	// CleansingServiceImpl implements the CleansingService interface
 	CleansingServiceImpl struct {
-		s3Service S3Service
+		s3Service      S3Service
+		contractorRepo repository.ContractorRepository
 	}
 
 	// NullCleansingService is a no-op implementation for testing
@@ -27,9 +30,10 @@ type (
 )
 
 // NewCleansingService creates a new cleansing service instance
-func NewCleansingService(s3Service S3Service) CleansingService {
+func NewCleansingService(s3Service S3Service, contractorRepo repository.ContractorRepository) CleansingService {
 	return &CleansingServiceImpl{
-		s3Service: s3Service,
+		s3Service:      s3Service,
+		contractorRepo: contractorRepo,
 	}
 }
 
@@ -83,32 +87,68 @@ func (cs *CleansingServiceImpl) DeleteContractorFiles(ctx context.Context, contr
 		Success: false,
 	}
 
-	// Get all S3 objects for the contractor
-	s3Objects, err := cs.s3Service.ListContractorFiles(ctx, contractorID)
+	// Step 1: Retrieve contractor record by ID
+	contractor, err := cs.contractorRepo.GetByID(ctx, contractorID)
 	if err != nil {
-		result.Error = fmt.Sprintf("failed to list contractor files: %v", err)
-		return result, err
+		errMsg := fmt.Sprintf("failed to retrieve contractor with ID %d: %v", contractorID, err)
+		logger.WithError(err).WithField("contractor_id", contractorID).Error("Failed to retrieve contractor")
+		result.Error = errMsg
+		return result, fmt.Errorf("failed to retrieve contractor with ID %d: %w", contractorID, err)
+	}
+
+	logger.WithFields(log.Fields{
+		"contractor_id":   contractorID,
+		"contractor_name": contractor.Name,
+		"bucket_name":     contractor.AwsBucketName,
+	}).Info("Retrieved contractor record")
+
+	// Step 2: Extract bucket name from contractor data
+	bucketName := contractor.AwsBucketName
+	if bucketName == "" {
+		errMsg := fmt.Sprintf("contractor %d has no bucket name configured", contractorID)
+		logger.WithField("contractor_id", contractorID).Warn("Contractor has no bucket name")
+		result.Error = errMsg
+		return result, fmt.Errorf("contractor %d has no bucket name configured", contractorID)
+	}
+
+	// Step 3: Delete the corresponding S3 bucket
+	logger.WithFields(log.Fields{
+		"contractor_id": contractorID,
+		"bucket_name":   bucketName,
+	}).Info("Deleting S3 bucket")
+
+	err = cs.s3Service.DeleteBucket(ctx, bucketName)
+	if err != nil {
+		errMsg := fmt.Sprintf("failed to delete S3 bucket %s for contractor %d: %v", bucketName, contractorID, err)
+		logger.WithError(err).WithFields(log.Fields{
+			"contractor_id": contractorID,
+			"bucket_name":   bucketName,
+		}).Error("Failed to delete S3 bucket")
+		result.Error = errMsg
+		return result, fmt.Errorf("failed to delete S3 bucket %s for contractor %d: %w", bucketName, contractorID, err)
 	}
 
 	logger.WithFields(log.Fields{
 		"contractor_id": contractorID,
-		"file_count":    len(s3Objects),
-	}).Info("Found files to delete for contractor")
+		"bucket_name":   bucketName,
+	}).Info("Successfully deleted S3 bucket")
 
-	// Delete all S3 objects
-	deletedCount, err := cs.s3Service.DeleteObjects(ctx, s3Objects)
+	// Step 4: Remove contractor record by ID
+	logger.WithField("contractor_id", contractorID).Info("Deleting contractor record")
+
+	err = cs.contractorRepo.Delete(ctx, contractorID)
 	if err != nil {
-		result.Error = fmt.Sprintf("failed to delete contractor files: %v", err)
-		result.FilesDeleted = deletedCount
-		return result, err
+		errMsg := fmt.Sprintf("failed to delete contractor record with ID %d: %v", contractorID, err)
+		logger.WithError(err).WithField("contractor_id", contractorID).Error("Failed to delete contractor record")
+		result.Error = errMsg
+		return result, fmt.Errorf("failed to delete contractor record with ID %d: %w", contractorID, err)
 	}
 
+	logger.WithField("contractor_id", contractorID).Info("Successfully deleted contractor record")
+
+	// Mark operation as successful
 	result.Success = true
-	result.FilesDeleted = deletedCount
-	logger.WithFields(log.Fields{
-		"contractor_id":  contractorID,
-		"files_deleted":  deletedCount,
-	}).Info("Successfully deleted contractor files")
+	logger.WithField("contractor_id", contractorID).Info("Contractor file deletion completed successfully")
 
 	return result, nil
 }
