@@ -3,9 +3,12 @@ package service
 import (
 	"context"
 	"fmt"
+	"sync"
 	"time"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
+	"github.com/aws/aws-sdk-go-v2/config"
+	"github.com/aws/aws-sdk-go-v2/credentials"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
 	"github.com/aws/aws-sdk-go-v2/service/s3/types"
 	"github.com/denys89/wadugs-worker-cleansing/src/dto"
@@ -27,9 +30,14 @@ type (
 
 	// S3ServiceImpl implements the S3Service interface
 	S3ServiceImpl struct {
-		client      *s3.Client
-		rateLimiter *rate.Limiter
-		fileService FileService
+		client          *s3.Client            // Default client for backward compatibility
+		regionClients   map[string]*s3.Client // Cache of region-specific clients
+		clientMutex     sync.RWMutex          // Mutex for thread-safe client cache access
+		awsConfig       aws.Config            // AWS config for creating new clients
+		accessKeyID     string                // AWS credentials
+		secretAccessKey string
+		rateLimiter     *rate.Limiter
+		fileService     FileService
 	}
 
 	// NullS3Service is a no-op implementation for testing
@@ -51,21 +59,73 @@ const (
 	maxDelay   = 5 * time.Second
 )
 
-// NewS3Service creates a new S3 service instance with rate limiting
-func NewS3Service(client *s3.Client, fileService FileService) S3Service {
+// NewS3Service creates a new S3 service instance with multi-region support
+func NewS3Service(client *s3.Client, awsConfig aws.Config, accessKeyID, secretAccessKey string, fileService FileService) S3Service {
 	// Create rate limiter: 100 requests per second with burst of 10
 	limiter := rate.NewLimiter(rate.Limit(requestsPerSecond), burstLimit)
 
 	return &S3ServiceImpl{
-		client:      client,
-		rateLimiter: limiter,
-		fileService: fileService,
+		client:          client,
+		regionClients:   make(map[string]*s3.Client),
+		awsConfig:       awsConfig,
+		accessKeyID:     accessKeyID,
+		secretAccessKey: secretAccessKey,
+		rateLimiter:     limiter,
+		fileService:     fileService,
 	}
 }
 
 // NewNullS3Service creates a null S3 service for testing
 func NewNullS3Service() S3Service {
 	return &NullS3Service{}
+}
+
+// getClientForRegion gets or creates an S3 client for a specific region
+func (s3s *S3ServiceImpl) getClientForRegion(ctx context.Context, region string) (*s3.Client, error) {
+	// If region is empty, use default client
+	if region == "" {
+		return s3s.client, nil
+	}
+
+	// Check if we already have a client for this region
+	s3s.clientMutex.RLock()
+	if client, exists := s3s.regionClients[region]; exists {
+		s3s.clientMutex.RUnlock()
+		return client, nil
+	}
+	s3s.clientMutex.RUnlock()
+
+	// Create new client for this region
+	s3s.clientMutex.Lock()
+	defer s3s.clientMutex.Unlock()
+
+	// Double-check in case another goroutine created it
+	if client, exists := s3s.regionClients[region]; exists {
+		return client, nil
+	}
+
+	logger := workerLog.GetLoggerFromContext(ctx)
+	logger.WithField("region", region).Info("Creating new S3 client for region")
+
+	// Create region-specific config
+	cfg, err := config.LoadDefaultConfig(ctx,
+		config.WithRegion(region),
+		config.WithCredentialsProvider(credentials.NewStaticCredentialsProvider(
+			s3s.accessKeyID,
+			s3s.secretAccessKey,
+			"", // session token
+		)),
+	)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create config for region %s: %w", region, err)
+	}
+
+	// Create S3 client for this region
+	client := s3.NewFromConfig(cfg)
+	s3s.regionClients[region] = client
+
+	logger.WithField("region", region).Info("Successfully created S3 client for region")
+	return client, nil
 }
 
 // ListContractorFiles lists all S3 objects for a contractor across all buckets
@@ -137,47 +197,70 @@ func (s3s *S3ServiceImpl) ListSiteFiles(ctx context.Context, siteID int64) ([]dt
 	return objects, nil
 }
 
-// DeleteObjects deletes multiple S3 objects in batches with concurrency control
+// DeleteObjects deletes multiple S3 objects in batches with concurrency control and multi-region support
 func (s3s *S3ServiceImpl) DeleteObjects(ctx context.Context, objects []dto.S3Object) (int, error) {
 	logger := workerLog.GetLoggerFromContext(ctx)
-	logger.WithField("total_objects", len(objects)).Info("Starting batch delete operation")
+	logger.WithField("total_objects", len(objects)).Info("Starting multi-region batch delete operation")
 
 	if len(objects) == 0 {
 		return 0, nil
 	}
 
-	// Group objects by bucket for efficient batch deletion
-	bucketObjects := make(map[string][]dto.S3Object)
+	// Group objects by region and bucket for efficient batch deletion
+	regionBucketObjects := make(map[string]map[string][]dto.S3Object)
 	for _, obj := range objects {
-		bucketObjects[obj.Bucket] = append(bucketObjects[obj.Bucket], obj)
+		region := obj.Region
+		if region == "" {
+			logger.WithField("bucket", obj.Bucket).Warn("Object missing region, using default client")
+		}
+
+		if regionBucketObjects[region] == nil {
+			regionBucketObjects[region] = make(map[string][]dto.S3Object)
+		}
+		regionBucketObjects[region][obj.Bucket] = append(regionBucketObjects[region][obj.Bucket], obj)
 	}
+
+	logger.WithField("regions_count", len(regionBucketObjects)).Info("Grouped objects by region")
 
 	totalDeleted := 0
 	g, ctx := errgroup.WithContext(ctx)
 	sem := make(chan struct{}, maxConcurrentDeletes)
 
-	for bucket, bucketObjs := range bucketObjects {
-		bucket := bucket
-		bucketObjs := bucketObjs
+	// Process each region
+	for region, bucketObjects := range regionBucketObjects {
+		region := region
+		bucketObjects := bucketObjects
 
-		sem <- struct{}{}
-		g.Go(func() error {
-			defer func() { <-sem }()
+		// For each bucket in this region
+		for bucket, bucketObjs := range bucketObjects {
+			bucket := bucket
+			bucketObjs := bucketObjs
 
-			deleted, err := s3s.deleteBucketObjects(ctx, bucket, bucketObjs)
-			if err != nil {
-				return fmt.Errorf("failed to delete objects in bucket %s: %w", bucket, err)
-			}
-			totalDeleted += deleted
-			return nil
-		})
+			sem <- struct{}{}
+			g.Go(func() error {
+				defer func() { <-sem }()
+
+				// Get region-specific client
+				client, err := s3s.getClientForRegion(ctx, region)
+				if err != nil {
+					return fmt.Errorf("failed to get S3 client for region %s: %w", region, err)
+				}
+
+				deleted, err := s3s.deleteBucketObjectsWithClient(ctx, client, bucket, bucketObjs)
+				if err != nil {
+					return fmt.Errorf("failed to delete objects in bucket %s (region %s): %w", bucket, region, err)
+				}
+				totalDeleted += deleted
+				return nil
+			})
+		}
 	}
 
 	if err := g.Wait(); err != nil {
 		return totalDeleted, err
 	}
 
-	logger.WithField("total_deleted", totalDeleted).Info("Completed batch delete operation")
+	logger.WithField("total_deleted", totalDeleted).Info("Completed multi-region batch delete operation")
 	return totalDeleted, nil
 }
 
@@ -195,6 +278,39 @@ func (s3s *S3ServiceImpl) deleteBucketObjects(ctx context.Context, bucket string
 
 		batch := objects[i:end]
 		deleted, err := s3s.deleteBatch(ctx, bucket, batch)
+		if err != nil {
+			logger.WithError(err).WithFields(log.Fields{
+				"bucket":     bucket,
+				"batch_size": len(batch),
+			}).Error("Failed to delete batch")
+			return totalDeleted, err
+		}
+
+		totalDeleted += deleted
+		logger.WithFields(log.Fields{
+			"bucket":        bucket,
+			"batch_deleted": deleted,
+			"total_deleted": totalDeleted,
+		}).Debug("Deleted batch of objects")
+	}
+
+	return totalDeleted, nil
+}
+
+// deleteBucketObjectsWithClient deletes objects in a specific bucket using a specific S3 client
+func (s3s *S3ServiceImpl) deleteBucketObjectsWithClient(ctx context.Context, client *s3.Client, bucket string, objects []dto.S3Object) (int, error) {
+	logger := workerLog.GetLoggerFromContext(ctx)
+	totalDeleted := 0
+
+	// Process objects in batches
+	for i := 0; i < len(objects); i += maxDeleteBatchSize {
+		end := i + maxDeleteBatchSize
+		if end > len(objects) {
+			end = len(objects)
+		}
+
+		batch := objects[i:end]
+		deleted, err := s3s.deleteBatchWithClient(ctx, client, bucket, batch)
 		if err != nil {
 			logger.WithError(err).WithFields(log.Fields{
 				"bucket":     bucket,
@@ -238,6 +354,49 @@ func (s3s *S3ServiceImpl) deleteBatch(ctx context.Context, bucket string, object
 	}
 
 	result, err := s3s.client.DeleteObjects(ctx, input)
+	if err != nil {
+		return 0, fmt.Errorf("failed to delete objects: %w", err)
+	}
+
+	// Check for errors in the response
+	if len(result.Errors) > 0 {
+		logger := workerLog.GetLoggerFromContext(ctx)
+		for _, deleteError := range result.Errors {
+			logger.WithFields(log.Fields{
+				"key":   aws.ToString(deleteError.Key),
+				"code":  aws.ToString(deleteError.Code),
+				"error": aws.ToString(deleteError.Message),
+			}).Error("Failed to delete object")
+		}
+	}
+
+	return len(result.Deleted), nil
+}
+
+// deleteBatchWithClient deletes a batch of objects using a specific S3 client
+func (s3s *S3ServiceImpl) deleteBatchWithClient(ctx context.Context, client *s3.Client, bucket string, objects []dto.S3Object) (int, error) {
+	if len(objects) == 0 {
+		return 0, nil
+	}
+
+	// Prepare delete objects
+	var deleteObjects []types.ObjectIdentifier
+	for _, obj := range objects {
+		deleteObjects = append(deleteObjects, types.ObjectIdentifier{
+			Key: aws.String(obj.Key),
+		})
+	}
+
+	// Perform batch delete
+	input := &s3.DeleteObjectsInput{
+		Bucket: aws.String(bucket),
+		Delete: &types.Delete{
+			Objects: deleteObjects,
+			Quiet:   aws.Bool(false), // We want to see what was deleted
+		},
+	}
+
+	result, err := client.DeleteObjects(ctx, input)
 	if err != nil {
 		return 0, fmt.Errorf("failed to delete objects: %w", err)
 	}

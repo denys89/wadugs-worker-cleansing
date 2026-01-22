@@ -28,6 +28,8 @@ type (
 	S3Object struct {
 		Bucket string `json:"bucket"`
 		Key    string `json:"key"`
+		Size   int64  `json:"size"`
+		Region string `json:"region"` // AWS region where the bucket is located
 	}
 
 	// DeletionContext contains information needed for file deletion operations

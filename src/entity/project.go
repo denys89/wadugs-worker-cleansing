@@ -12,6 +12,7 @@ type (
 
 	Project struct {
 		Id               int64  `json:"id" gorm:"column:id;primaryKey"`
+		ContractorId     int64  `json:"contractor_id" gorm:"column:contractor_id"`
 		Name             string `json:"name" gorm:"column:name"`
 		Code             string `json:"code" gorm:"column:code"`
 		ProjectNumber    string `json:"project_number" gorm:"column:project_number"`

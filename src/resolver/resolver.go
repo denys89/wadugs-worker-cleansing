@@ -3,6 +3,7 @@ package resolver
 import (
 	"context"
 	"fmt"
+
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/config"
 	"github.com/aws/aws-sdk-go-v2/credentials"
@@ -134,15 +135,35 @@ func (r *Resolver) ResolveS3Service(ctx context.Context) (service.S3Service, err
 		return nil, fmt.Errorf("failed to resolve S3 client: %w", err)
 	}
 
+	// Create AWS config for multi-region support
+	var awsConfig aws.Config
+	if r.config.AWSAccessKeyID != "" && r.config.AWSSecretAccessKey != "" {
+		awsConfig, err = config.LoadDefaultConfig(ctx,
+			config.WithRegion(r.config.AWSRegion),
+			config.WithCredentialsProvider(credentials.NewStaticCredentialsProvider(
+				r.config.AWSAccessKeyID,
+				r.config.AWSSecretAccessKey,
+				"", // session token
+			)),
+		)
+	} else {
+		awsConfig, err = config.LoadDefaultConfig(ctx,
+			config.WithRegion(r.config.AWSRegion),
+		)
+	}
+	if err != nil {
+		return nil, fmt.Errorf("failed to load AWS config: %w", err)
+	}
+
 	// Resolve file service dependency
 	fileService, err := r.ResolveFileService(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("failed to resolve file service: %w", err)
 	}
 
-	// Create and return S3 service with file service dependency
-	s3Service := service.NewS3Service(s3Client, fileService)
-	log.Info("S3 service resolved successfully")
+	// Create and return S3 service with multi-region support
+	s3Service := service.NewS3Service(s3Client, awsConfig, r.config.AWSAccessKeyID, r.config.AWSSecretAccessKey, fileService)
+	log.Info("S3 service resolved successfully with multi-region support")
 
 	return s3Service, nil
 }
@@ -165,8 +186,51 @@ func (r *Resolver) ResolveCleansingService(ctx context.Context) service.Cleansin
 		return service.NewNullCleansingService()
 	}
 
-	// Create and return cleansing service
-	cleansingService := service.NewCleansingService(s3Service, contractorRepo)
+	// Create project repository
+	projectRepo, err := r.ResolveProjectRepository(ctx)
+	if err != nil {
+		log.WithError(err).Error("Failed to resolve project repository, using null cleansing service")
+		return service.NewNullCleansingService()
+	}
+
+	// Create site repository
+	siteRepo, err := r.ResolveSiteRepository(ctx)
+	if err != nil {
+		log.WithError(err).Error("Failed to resolve site repository, using null cleansing service")
+		return service.NewNullCleansingService()
+	}
+
+	// Create document group repository
+	documentGroupRepo, err := r.ResolveDocumentGroupRepository(ctx)
+	if err != nil {
+		log.WithError(err).Error("Failed to resolve document group repository, using null cleansing service")
+		return service.NewNullCleansingService()
+	}
+
+	// Create document repository
+	documentRepo, err := r.ResolveDocumentRepository(ctx)
+	if err != nil {
+		log.WithError(err).Error("Failed to resolve document repository, using null cleansing service")
+		return service.NewNullCleansingService()
+	}
+
+	// Create file repository
+	fileRepo, err := r.ResolveFileRepository(ctx)
+	if err != nil {
+		log.WithError(err).Error("Failed to resolve file repository, using null cleansing service")
+		return service.NewNullCleansingService()
+	}
+
+	// Create and return cleansing service with all dependencies
+	cleansingService := service.NewCleansingService(
+		s3Service,
+		contractorRepo,
+		projectRepo,
+		siteRepo,
+		documentGroupRepo,
+		documentRepo,
+		fileRepo,
+	)
 	log.Info("Cleansing service resolved successfully")
 
 	return cleansingService

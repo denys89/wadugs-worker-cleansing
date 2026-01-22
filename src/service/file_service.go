@@ -22,8 +22,8 @@ type (
 
 	// FileServiceImpl implements the FileService interface
 	FileServiceImpl struct {
-		contractorRepo     repository.ContractorRepository
-		projectRepo        repository.ProjectRepository
+		contractorRepo    repository.ContractorRepository
+		projectRepo       repository.ProjectRepository
 		siteRepo          repository.SiteRepository
 		documentGroupRepo repository.DocumentGroupRepository
 		documentRepo      repository.DocumentRepository
@@ -57,6 +57,12 @@ func (fs *FileServiceImpl) GetContractorFiles(ctx context.Context, contractorID 
 
 	var allObjects []dto.S3Object
 
+	// Get the contractor information first to access bucket details
+	contractor, err := fs.contractorRepo.GetByID(ctx, contractorID)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get contractor %d: %w", contractorID, err)
+	}
+
 	// 1. Query the database to get all projects for this contractor
 	projects, err := fs.projectRepo.GetByContractorID(ctx, contractorID)
 	if err != nil {
@@ -75,8 +81,8 @@ func (fs *FileServiceImpl) GetContractorFiles(ctx context.Context, contractorID 
 		}
 
 		logger.WithFields(log.Fields{
-			"project_id":  project.Id,
-			"site_count":  len(sites),
+			"project_id": project.Id,
+			"site_count": len(sites),
 		}).Debug("Found sites for project")
 
 		// Process each site
@@ -109,14 +115,14 @@ func (fs *FileServiceImpl) GetContractorFiles(ctx context.Context, contractorID 
 					// 6. For each file, build S3 object information
 					for _, file := range files {
 						// Build S3 key based on the file path structure
-						s3Objects := fs.buildS3ObjectsFromFile(project, site, docGroup, file)
+						s3Objects := fs.buildS3ObjectsFromFile(project, site, docGroup, file, *contractor)
 						allObjects = append(allObjects, s3Objects...)
 					}
 				}
 
 				// Handle processed files if they exist
 				if (docGroup.Progress == 40 || docGroup.Progress == 11) && docGroup.ProcessedName != "" {
-					processedObjects := fs.buildProcessedS3Objects(project, site, docGroup)
+					processedObjects := fs.buildProcessedS3Objects(project, site, docGroup, *contractor)
 					allObjects = append(allObjects, processedObjects...)
 				}
 			}
@@ -142,6 +148,12 @@ func (fs *FileServiceImpl) GetProjectFiles(ctx context.Context, projectID int64)
 	project, err := fs.projectRepo.GetByID(ctx, projectID)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get project %d: %w", projectID, err)
+	}
+
+	// Get the contractor information to access bucket details
+	contractor, err := fs.contractorRepo.GetByID(ctx, project.ContractorId)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get contractor %d for project %d: %w", project.ContractorId, projectID, err)
 	}
 
 	// Get all sites for this project
@@ -181,14 +193,14 @@ func (fs *FileServiceImpl) GetProjectFiles(ctx context.Context, projectID int64)
 
 				// Build S3 objects from files
 				for _, file := range files {
-					s3Objects := fs.buildS3ObjectsFromFile(*project, site, docGroup, file)
+					s3Objects := fs.buildS3ObjectsFromFile(*project, site, docGroup, file, *contractor)
 					allObjects = append(allObjects, s3Objects...)
 				}
 			}
 
 			// Handle processed files if they exist
 			if (docGroup.Progress == 40 || docGroup.Progress == 11) && docGroup.ProcessedName != "" {
-				processedObjects := fs.buildProcessedS3Objects(*project, site, docGroup)
+				processedObjects := fs.buildProcessedS3Objects(*project, site, docGroup, *contractor)
 				allObjects = append(allObjects, processedObjects...)
 			}
 		}
@@ -221,6 +233,12 @@ func (fs *FileServiceImpl) GetSiteFiles(ctx context.Context, siteID int64) ([]dt
 		return nil, fmt.Errorf("failed to get project %d for site %d: %w", site.ProjectId, siteID, err)
 	}
 
+	// Get the contractor information to access bucket details
+	contractor, err := fs.contractorRepo.GetByID(ctx, project.ContractorId)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get contractor %d for project %d: %w", project.ContractorId, project.Id, err)
+	}
+
 	// Get all document groups for this site
 	documentGroups, err := fs.documentGroupRepo.GetBySiteID(ctx, siteID)
 	if err != nil {
@@ -249,14 +267,14 @@ func (fs *FileServiceImpl) GetSiteFiles(ctx context.Context, siteID int64) ([]dt
 
 			// Build S3 objects from files
 			for _, file := range files {
-				s3Objects := fs.buildS3ObjectsFromFile(*project, *site, docGroup, file)
+				s3Objects := fs.buildS3ObjectsFromFile(*project, *site, docGroup, file, *contractor)
 				allObjects = append(allObjects, s3Objects...)
 			}
 		}
 
 		// Handle processed files if they exist
 		if (docGroup.Progress == 40 || docGroup.Progress == 11) && docGroup.ProcessedName != "" {
-			processedObjects := fs.buildProcessedS3Objects(*project, *site, docGroup)
+			processedObjects := fs.buildProcessedS3Objects(*project, *site, docGroup, *contractor)
 			allObjects = append(allObjects, processedObjects...)
 		}
 	}
@@ -270,7 +288,7 @@ func (fs *FileServiceImpl) GetSiteFiles(ctx context.Context, siteID int64) ([]dt
 }
 
 // buildS3ObjectsFromFile builds S3 object information from a file entity
-func (fs *FileServiceImpl) buildS3ObjectsFromFile(project entity.Project, site entity.Site, docGroup entity.DocumentGroup, file entity.File) []dto.S3Object {
+func (fs *FileServiceImpl) buildS3ObjectsFromFile(project entity.Project, site entity.Site, docGroup entity.DocumentGroup, file entity.File, contractor entity.Contractor) []dto.S3Object {
 	var objects []dto.S3Object
 
 	// Determine if we need to split the file name based on document group category
@@ -286,7 +304,7 @@ func (fs *FileServiceImpl) buildS3ObjectsFromFile(project entity.Project, site e
 
 	// Build the base path: {projectCode}/{siteCode}/00_Upload/
 	basePath := fmt.Sprintf("%s/%s/00_Upload/", project.Code, site.Code)
-	
+
 	fileName := file.Name
 	if needSplit {
 		fileNameSplit := strings.Split(file.Name, "/")
@@ -297,10 +315,12 @@ func (fs *FileServiceImpl) buildS3ObjectsFromFile(project entity.Project, site e
 
 	s3Key := fmt.Sprintf("%s%s", basePath, fileName)
 
-	// Create S3 object with the key structure
+	// Create S3 object with the key structure, size, bucket, and region information
 	object := dto.S3Object{
-		Key: s3Key,
-		// Bucket would be populated based on project/site configuration
+		Key:    s3Key,
+		Size:   file.Size,
+		Bucket: contractor.AwsBucketName,
+		Region: contractor.AwsBucketRegion,
 	}
 
 	objects = append(objects, object)
@@ -308,7 +328,7 @@ func (fs *FileServiceImpl) buildS3ObjectsFromFile(project entity.Project, site e
 }
 
 // buildProcessedS3Objects builds S3 objects for processed files
-func (fs *FileServiceImpl) buildProcessedS3Objects(project entity.Project, site entity.Site, docGroup entity.DocumentGroup) []dto.S3Object {
+func (fs *FileServiceImpl) buildProcessedS3Objects(project entity.Project, site entity.Site, docGroup entity.DocumentGroup, contractor entity.Contractor) []dto.S3Object {
 	var objects []dto.S3Object
 
 	// Build the processed files path: {projectCode}/{siteCode}/01_Processed/
@@ -317,7 +337,9 @@ func (fs *FileServiceImpl) buildProcessedS3Objects(project entity.Project, site 
 	// Add the main geojson file
 	mainKey := fmt.Sprintf("%s%s.geojson", basePath, docGroup.ProcessedName)
 	objects = append(objects, dto.S3Object{
-		Key: mainKey,
+		Key:    mainKey,
+		Bucket: contractor.AwsBucketName,
+		Region: contractor.AwsBucketRegion,
 	})
 
 	// Add additional files for raster types
@@ -326,7 +348,9 @@ func (fs *FileServiceImpl) buildProcessedS3Objects(project entity.Project, site 
 		for _, fileType := range fileTypes {
 			key := fmt.Sprintf("%s%s%s", basePath, docGroup.ProcessedName, fileType)
 			objects = append(objects, dto.S3Object{
-				Key: key,
+				Key:    key,
+				Bucket: contractor.AwsBucketName,
+				Region: contractor.AwsBucketRegion,
 			})
 		}
 	}

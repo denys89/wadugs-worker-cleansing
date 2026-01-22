@@ -21,8 +21,13 @@ type (
 
 	// CleansingServiceImpl implements the CleansingService interface
 	CleansingServiceImpl struct {
-		s3Service      S3Service
-		contractorRepo repository.ContractorRepository
+		s3Service         S3Service
+		contractorRepo    repository.ContractorRepository
+		projectRepo       repository.ProjectRepository
+		siteRepo          repository.SiteRepository
+		documentGroupRepo repository.DocumentGroupRepository
+		documentRepo      repository.DocumentRepository
+		fileRepo          repository.FileRepository
 	}
 
 	// NullCleansingService is a no-op implementation for testing
@@ -30,10 +35,23 @@ type (
 )
 
 // NewCleansingService creates a new cleansing service instance
-func NewCleansingService(s3Service S3Service, contractorRepo repository.ContractorRepository) CleansingService {
+func NewCleansingService(
+	s3Service S3Service,
+	contractorRepo repository.ContractorRepository,
+	projectRepo repository.ProjectRepository,
+	siteRepo repository.SiteRepository,
+	documentGroupRepo repository.DocumentGroupRepository,
+	documentRepo repository.DocumentRepository,
+	fileRepo repository.FileRepository,
+) CleansingService {
 	return &CleansingServiceImpl{
-		s3Service:      s3Service,
-		contractorRepo: contractorRepo,
+		s3Service:         s3Service,
+		contractorRepo:    contractorRepo,
+		projectRepo:       projectRepo,
+		siteRepo:          siteRepo,
+		documentGroupRepo: documentGroupRepo,
+		documentRepo:      documentRepo,
+		fileRepo:          fileRepo,
 	}
 }
 
@@ -144,6 +162,41 @@ func (cs *CleansingServiceImpl) DeleteProjectFiles(ctx context.Context, projectI
 	if err != nil {
 		result.Error = fmt.Sprintf("failed to delete project files: %v", err)
 		result.FilesDeleted = deletedCount
+
+		// If some files were deleted before the error, still update usage for those
+		if deletedCount > 0 {
+			deletedSize := cs.calculateSizeForDeletedFiles(s3Objects, deletedCount)
+			if updateErr := cs.projectRepo.UpdateProjectUsage(ctx, projectID, -deletedSize); updateErr != nil {
+				logger.WithError(updateErr).WithFields(log.Fields{
+					"project_id":   projectID,
+					"deleted_size": deletedSize,
+				}).Warn("Failed to update project usage for partially deleted files")
+			} else {
+				logger.WithFields(log.Fields{
+					"project_id":    projectID,
+					"files_deleted": deletedCount,
+					"deleted_size":  deletedSize,
+				}).Info("Updated project usage for partially deleted files")
+			}
+		}
+		return result, err
+	}
+
+	// Calculate total file size for successfully deleted files
+	// Since all files were successfully deleted, we can use the full size
+	var totalSize int64
+	for _, obj := range s3Objects {
+		totalSize += obj.Size
+	}
+
+	// Update usage metrics for successful deletion
+	if err := cs.projectRepo.UpdateProjectUsage(ctx, projectID, -totalSize); err != nil {
+		logger.WithError(err).WithFields(log.Fields{
+			"project_id": projectID,
+			"total_size": totalSize,
+		}).Error("Failed to update project usage after successful deletion")
+		result.Error = fmt.Sprintf("failed to update project usage: %v", err)
+		result.FilesDeleted = deletedCount
 		return result, err
 	}
 
@@ -152,6 +205,7 @@ func (cs *CleansingServiceImpl) DeleteProjectFiles(ctx context.Context, projectI
 	logger.WithFields(log.Fields{
 		"project_id":    projectID,
 		"files_deleted": deletedCount,
+		"total_size":    totalSize,
 	}).Info("Successfully deleted project files")
 
 	return result, nil
@@ -166,6 +220,14 @@ func (cs *CleansingServiceImpl) DeleteSiteFiles(ctx context.Context, siteID int6
 		Type:    dto.CleansingTypeSite,
 		ID:      siteID,
 		Success: false,
+	}
+
+	// Get the site to obtain project ID for usage update
+	site, err := cs.siteRepo.GetByID(ctx, siteID)
+	if err != nil {
+		logger.WithError(err).WithField("site_id", siteID).Error("Failed to get site information")
+		result.Error = fmt.Sprintf("failed to get site information: %v", err)
+		return result, err
 	}
 
 	// Get all S3 objects for the site
@@ -188,12 +250,67 @@ func (cs *CleansingServiceImpl) DeleteSiteFiles(ctx context.Context, siteID int6
 		return result, err
 	}
 
+	// Calculate total file size for successfully deleted files
+	var totalSize int64
+	for _, obj := range s3Objects {
+		totalSize += obj.Size
+	}
+
+	// Update usage metrics for successful deletion
+	if err := cs.projectRepo.UpdateProjectUsage(ctx, site.ProjectId, -totalSize); err != nil {
+		logger.WithError(err).WithFields(log.Fields{
+			"site_id":    siteID,
+			"project_id": site.ProjectId,
+			"total_size": totalSize,
+		}).Error("Failed to update project usage after successful site deletion")
+		// Continue with database cleanup even if usage update fails
+	}
+
+	// =====================================================
+	// Database cascade deletion (bottom-up order)
+	// =====================================================
+	logger.WithField("site_id", siteID).Info("Starting database cascade deletion for site")
+
+	// 1. Delete all files belonging to documents of this site
+	if err := cs.fileRepo.HardDeleteBySiteID(ctx, siteID); err != nil {
+		logger.WithError(err).WithField("site_id", siteID).Error("Failed to delete file records")
+		result.Error = fmt.Sprintf("failed to delete file records: %v", err)
+		result.FilesDeleted = deletedCount
+		return result, err
+	}
+
+	// 2. Delete all documents belonging to document groups of this site
+	if err := cs.documentRepo.HardDeleteBySiteID(ctx, siteID); err != nil {
+		logger.WithError(err).WithField("site_id", siteID).Error("Failed to delete document records")
+		result.Error = fmt.Sprintf("failed to delete document records: %v", err)
+		result.FilesDeleted = deletedCount
+		return result, err
+	}
+
+	// 3. Delete all document groups of this site
+	if err := cs.documentGroupRepo.HardDeleteBySiteID(ctx, siteID); err != nil {
+		logger.WithError(err).WithField("site_id", siteID).Error("Failed to delete document group records")
+		result.Error = fmt.Sprintf("failed to delete document group records: %v", err)
+		result.FilesDeleted = deletedCount
+		return result, err
+	}
+
+	// 4. Delete the site itself
+	if err := cs.siteRepo.HardDelete(ctx, siteID); err != nil {
+		logger.WithError(err).WithField("site_id", siteID).Error("Failed to delete site record")
+		result.Error = fmt.Sprintf("failed to delete site record: %v", err)
+		result.FilesDeleted = deletedCount
+		return result, err
+	}
+
 	result.Success = true
 	result.FilesDeleted = deletedCount
 	logger.WithFields(log.Fields{
 		"site_id":       siteID,
+		"project_id":    site.ProjectId,
 		"files_deleted": deletedCount,
-	}).Info("Successfully deleted site files")
+		"total_size":    totalSize,
+	}).Info("Successfully deleted site files and database records")
 
 	return result, nil
 }
@@ -206,6 +323,20 @@ func (ncs *NullCleansingService) ProcessCleansingMessage(ctx context.Context, me
 		Success:      true,
 		FilesDeleted: 0,
 	}, nil
+}
+
+// calculateSizeForDeletedFiles calculates the total size of files that were successfully deleted
+// This assumes files are deleted in order and the first 'deletedCount' files were successfully deleted
+func (cs *CleansingServiceImpl) calculateSizeForDeletedFiles(s3Objects []dto.S3Object, deletedCount int) int64 {
+	var totalSize int64
+
+	// Only count the size of files that were actually deleted
+	// The S3 service returns the count of successfully deleted files
+	for i := 0; i < deletedCount && i < len(s3Objects); i++ {
+		totalSize += s3Objects[i].Size
+	}
+
+	return totalSize
 }
 
 func (ncs *NullCleansingService) DeleteContractorFiles(ctx context.Context, contractorID int64) (*dto.CleansingResult, error) {

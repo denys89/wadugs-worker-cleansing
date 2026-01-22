@@ -3,6 +3,7 @@ package service
 import (
 	"context"
 	"testing"
+
 	"github.com/denys89/wadugs-worker-cleansing/src/dto"
 	"github.com/denys89/wadugs-worker-cleansing/src/entity"
 )
@@ -38,10 +39,154 @@ func (m *mockContractorRepository) GetByStatus(ctx context.Context, status int8)
 	return entity.Contractors{}, nil
 }
 
+// Mock project repository for testing
+type mockProjectRepository struct{}
+
+func (m *mockProjectRepository) GetByID(ctx context.Context, id int64) (*entity.Project, error) {
+	return &entity.Project{
+		Id:           id,
+		Name:         "Test Project",
+		ContractorId: 1,
+	}, nil
+}
+
+func (m *mockProjectRepository) GetAll(ctx context.Context) (entity.Projects, error) {
+	return entity.Projects{}, nil
+}
+
+func (m *mockProjectRepository) GetByContractorID(ctx context.Context, contractorID int64) (entity.Projects, error) {
+	return entity.Projects{}, nil
+}
+
+func (m *mockProjectRepository) GetByStatus(ctx context.Context, status int8) (entity.Projects, error) {
+	return entity.Projects{}, nil
+}
+
+func (m *mockProjectRepository) UpdateProjectUsage(ctx context.Context, projectID int64, sizeDelta int64) error {
+	return nil
+}
+
+func (m *mockProjectRepository) HardDelete(ctx context.Context, id int64) error {
+	return nil
+}
+
+func (m *mockProjectRepository) HardDeleteByContractorID(ctx context.Context, contractorID int64) error {
+	return nil
+}
+
+// Mock site repository for testing
+type mockSiteRepository struct{}
+
+func (m *mockSiteRepository) GetByID(ctx context.Context, id int64) (*entity.Site, error) {
+	return &entity.Site{
+		Id:        id,
+		Name:      "Test Site",
+		ProjectId: 1,
+	}, nil
+}
+
+func (m *mockSiteRepository) GetAll(ctx context.Context) (entity.Sites, error) {
+	return entity.Sites{}, nil
+}
+
+func (m *mockSiteRepository) GetByProjectID(ctx context.Context, projectID int64) (entity.Sites, error) {
+	return entity.Sites{}, nil
+}
+
+func (m *mockSiteRepository) GetByStatus(ctx context.Context, status int8) (entity.Sites, error) {
+	return entity.Sites{}, nil
+}
+
+func (m *mockSiteRepository) HardDelete(ctx context.Context, id int64) error {
+	return nil
+}
+
+func (m *mockSiteRepository) HardDeleteByProjectID(ctx context.Context, projectID int64) error {
+	return nil
+}
+
+// Mock document group repository for testing
+type mockDocumentGroupRepository struct{}
+
+func (m *mockDocumentGroupRepository) GetByID(ctx context.Context, id int64) (*entity.DocumentGroup, error) {
+	return &entity.DocumentGroup{Id: id}, nil
+}
+
+func (m *mockDocumentGroupRepository) GetAll(ctx context.Context) (entity.DocumentGroups, error) {
+	return entity.DocumentGroups{}, nil
+}
+
+func (m *mockDocumentGroupRepository) GetBySiteID(ctx context.Context, siteID int64) (entity.DocumentGroups, error) {
+	return entity.DocumentGroups{}, nil
+}
+
+func (m *mockDocumentGroupRepository) GetByStatus(ctx context.Context, status int8) (entity.DocumentGroups, error) {
+	return entity.DocumentGroups{}, nil
+}
+
+func (m *mockDocumentGroupRepository) GetByProgress(ctx context.Context, progress int8) (entity.DocumentGroups, error) {
+	return entity.DocumentGroups{}, nil
+}
+
+func (m *mockDocumentGroupRepository) HardDeleteBySiteID(ctx context.Context, siteID int64) error {
+	return nil
+}
+
+// Mock document repository for testing
+type mockDocumentRepository struct{}
+
+func (m *mockDocumentRepository) GetByID(ctx context.Context, id int64) (*entity.Document, error) {
+	return &entity.Document{Id: id}, nil
+}
+
+func (m *mockDocumentRepository) GetAll(ctx context.Context) (entity.Documents, error) {
+	return entity.Documents{}, nil
+}
+
+func (m *mockDocumentRepository) GetByGroupID(ctx context.Context, groupID int64) (entity.Documents, error) {
+	return entity.Documents{}, nil
+}
+
+func (m *mockDocumentRepository) GetByStatus(ctx context.Context, status int8) (entity.Documents, error) {
+	return entity.Documents{}, nil
+}
+
+func (m *mockDocumentRepository) HardDeleteBySiteID(ctx context.Context, siteID int64) error {
+	return nil
+}
+
+// Mock file repository for testing
+type mockFileRepository struct{}
+
+func (m *mockFileRepository) GetByID(ctx context.Context, id int64) (*entity.File, error) {
+	return &entity.File{Id: id}, nil
+}
+
+func (m *mockFileRepository) GetAll(ctx context.Context) (entity.Files, error) {
+	return entity.Files{}, nil
+}
+
+func (m *mockFileRepository) GetByDocumentID(ctx context.Context, documentID int64) (entity.Files, error) {
+	return entity.Files{}, nil
+}
+
+func (m *mockFileRepository) GetByStatus(ctx context.Context, status int8) (entity.Files, error) {
+	return entity.Files{}, nil
+}
+
+func (m *mockFileRepository) HardDeleteBySiteID(ctx context.Context, siteID int64) error {
+	return nil
+}
+
 func TestCleansingService_ProcessCleansingMessage(t *testing.T) {
 	s3Service := NewNullS3Service()
 	contractorRepo := &mockContractorRepository{}
-	service := NewCleansingService(s3Service, contractorRepo)
+	projectRepo := &mockProjectRepository{}
+	siteRepo := &mockSiteRepository{}
+	docGroupRepo := &mockDocumentGroupRepository{}
+	docRepo := &mockDocumentRepository{}
+	fileRepo := &mockFileRepository{}
+	service := NewCleansingService(s3Service, contractorRepo, projectRepo, siteRepo, docGroupRepo, docRepo, fileRepo)
 
 	tests := []struct {
 		name    string
@@ -103,8 +248,8 @@ func TestNullCleansingService_ProcessCleansingMessage(t *testing.T) {
 	service := NewNullCleansingService()
 
 	tests := []struct {
-		name       string
-		message    dto.CleansingMessage
+		name    string
+		message dto.CleansingMessage
 	}{
 		{
 			name:    "Contractor message",
@@ -133,7 +278,7 @@ func TestNullCleansingService_ProcessCleansingMessage(t *testing.T) {
 			if err != nil {
 				t.Errorf("Null service should not return error, got: %v", err)
 			}
-			
+
 			// Should return a successful result
 			if result == nil || !result.Success {
 				t.Error("Null service should return successful result")
@@ -156,7 +301,12 @@ func TestCleansingService_ValidEntityID(t *testing.T) {
 func TestCleansingService_ErrorHandling(t *testing.T) {
 	s3Service := NewNullS3Service()
 	contractorRepo := &mockContractorRepository{}
-	service := NewCleansingService(s3Service, contractorRepo)
+	projectRepo := &mockProjectRepository{}
+	siteRepo := &mockSiteRepository{}
+	docGroupRepo := &mockDocumentGroupRepository{}
+	docRepo := &mockDocumentRepository{}
+	fileRepo := &mockFileRepository{}
+	service := NewCleansingService(s3Service, contractorRepo, projectRepo, siteRepo, docGroupRepo, docRepo, fileRepo)
 
 	ctx := context.Background()
 
@@ -177,7 +327,12 @@ func TestCleansingService_ErrorHandling(t *testing.T) {
 func BenchmarkCleansingService_ProcessCleansingMessage(b *testing.B) {
 	s3Service := NewNullS3Service()
 	contractorRepo := &mockContractorRepository{}
-	service := NewCleansingService(s3Service, contractorRepo)
+	projectRepo := &mockProjectRepository{}
+	siteRepo := &mockSiteRepository{}
+	docGroupRepo := &mockDocumentGroupRepository{}
+	docRepo := &mockDocumentRepository{}
+	fileRepo := &mockFileRepository{}
+	service := NewCleansingService(s3Service, contractorRepo, projectRepo, siteRepo, docGroupRepo, docRepo, fileRepo)
 	ctx := context.Background()
 	message := dto.CleansingMessage{Type: "contractor", ID: 123}
 

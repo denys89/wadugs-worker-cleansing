@@ -2,6 +2,7 @@ package repository
 
 import (
 	"context"
+
 	"github.com/denys89/wadugs-worker-cleansing/src/entity"
 	"gorm.io/gorm"
 )
@@ -60,4 +61,9 @@ func (r *documentGroupRepository) GetByProgress(ctx context.Context, progress in
 		return nil, err
 	}
 	return documentGroups, nil
+}
+
+// HardDeleteBySiteID permanently deletes all document groups belonging to a site
+func (r *documentGroupRepository) HardDeleteBySiteID(ctx context.Context, siteID int64) error {
+	return r.db.WithContext(ctx).Where("site_id = ?", siteID).Delete(&entity.DocumentGroup{}).Error
 }

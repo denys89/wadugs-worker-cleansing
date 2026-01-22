@@ -2,6 +2,7 @@ package repository
 
 import (
 	"context"
+
 	"github.com/denys89/wadugs-worker-cleansing/src/entity"
 	"gorm.io/gorm"
 )
@@ -51,4 +52,11 @@ func (r *documentRepository) GetByStatus(ctx context.Context, status int8) (enti
 		return nil, err
 	}
 	return documents, nil
+}
+
+// HardDeleteBySiteID permanently deletes all documents belonging to document groups of a site
+func (r *documentRepository) HardDeleteBySiteID(ctx context.Context, siteID int64) error {
+	return r.db.WithContext(ctx).
+		Exec("DELETE FROM document WHERE group_id IN (SELECT id FROM document_group WHERE site_id = ?)", siteID).
+		Error
 }

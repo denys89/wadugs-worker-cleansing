@@ -2,6 +2,7 @@ package repository
 
 import (
 	"context"
+
 	"github.com/denys89/wadugs-worker-cleansing/src/entity"
 	"gorm.io/gorm"
 )
@@ -51,4 +52,14 @@ func (r *siteRepository) GetByStatus(ctx context.Context, status int8) (entity.S
 		return nil, err
 	}
 	return sites, nil
+}
+
+// HardDelete permanently deletes a site by ID
+func (r *siteRepository) HardDelete(ctx context.Context, id int64) error {
+	return r.db.WithContext(ctx).Delete(&entity.Site{}, "id = ?", id).Error
+}
+
+// HardDeleteByProjectID permanently deletes all sites belonging to a project
+func (r *siteRepository) HardDeleteByProjectID(ctx context.Context, projectID int64) error {
+	return r.db.WithContext(ctx).Where("project_id = ?", projectID).Delete(&entity.Site{}).Error
 }

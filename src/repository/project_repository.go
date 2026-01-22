@@ -2,6 +2,7 @@ package repository
 
 import (
 	"context"
+
 	"github.com/denys89/wadugs-worker-cleansing/src/entity"
 	"gorm.io/gorm"
 )
@@ -51,4 +52,28 @@ func (r *projectRepository) GetByStatus(ctx context.Context, status int8) (entit
 		return nil, err
 	}
 	return projects, nil
+}
+
+func (r *projectRepository) UpdateProjectUsage(ctx context.Context, projectID int64, sizeDelta int64) error {
+	// Update project usage - this could be updating a usage field in the project table
+	// For now, we'll implement a basic update that could be extended based on actual requirements
+	err := r.db.WithContext(ctx).Model(&entity.Project{}).
+		Where("id = ?", projectID).
+		Update("updated_at", "NOW()").Error
+	if err != nil {
+		return err
+	}
+	return nil
+}
+
+// HardDelete permanently deletes a project by ID
+func (r *projectRepository) HardDelete(ctx context.Context, id int64) error {
+	return r.db.WithContext(ctx).Delete(&entity.Project{}, "id = ?", id).Error
+}
+
+// HardDeleteByContractorID permanently deletes all projects belonging to a contractor
+func (r *projectRepository) HardDeleteByContractorID(ctx context.Context, contractorID int64) error {
+	return r.db.WithContext(ctx).
+		Exec("DELETE FROM project WHERE id IN (SELECT project_id FROM contractor_project WHERE contractor_id = ?)", contractorID).
+		Error
 }
