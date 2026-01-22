@@ -22,18 +22,20 @@ type (
 
 	// FileServiceImpl implements the FileService interface
 	FileServiceImpl struct {
-		contractorRepo    repository.ContractorRepository
-		projectRepo       repository.ProjectRepository
-		siteRepo          repository.SiteRepository
-		documentGroupRepo repository.DocumentGroupRepository
-		documentRepo      repository.DocumentRepository
-		fileRepo          repository.FileRepository
+		contractorRepo        repository.ContractorRepository
+		contractorProjectRepo repository.ContractorProjectRepository
+		projectRepo           repository.ProjectRepository
+		siteRepo              repository.SiteRepository
+		documentGroupRepo     repository.DocumentGroupRepository
+		documentRepo          repository.DocumentRepository
+		fileRepo              repository.FileRepository
 	}
 )
 
 // NewFileService creates a new file service instance
 func NewFileService(
 	contractorRepo repository.ContractorRepository,
+	contractorProjectRepo repository.ContractorProjectRepository,
 	projectRepo repository.ProjectRepository,
 	siteRepo repository.SiteRepository,
 	documentGroupRepo repository.DocumentGroupRepository,
@@ -41,12 +43,13 @@ func NewFileService(
 	fileRepo repository.FileRepository,
 ) FileService {
 	return &FileServiceImpl{
-		contractorRepo:    contractorRepo,
-		projectRepo:       projectRepo,
-		siteRepo:          siteRepo,
-		documentGroupRepo: documentGroupRepo,
-		documentRepo:      documentRepo,
-		fileRepo:          fileRepo,
+		contractorRepo:        contractorRepo,
+		contractorProjectRepo: contractorProjectRepo,
+		projectRepo:           projectRepo,
+		siteRepo:              siteRepo,
+		documentGroupRepo:     documentGroupRepo,
+		documentRepo:          documentRepo,
+		fileRepo:              fileRepo,
 	}
 }
 
@@ -150,10 +153,20 @@ func (fs *FileServiceImpl) GetProjectFiles(ctx context.Context, projectID int64)
 		return nil, fmt.Errorf("failed to get project %d: %w", projectID, err)
 	}
 
-	// Get the contractor information to access bucket details
-	contractor, err := fs.contractorRepo.GetByID(ctx, project.ContractorId)
+	// Get contractor_id from contractor_project join table
+	contractorProject, err := fs.contractorProjectRepo.GetByProjectID(ctx, projectID)
 	if err != nil {
-		return nil, fmt.Errorf("failed to get contractor %d for project %d: %w", project.ContractorId, projectID, err)
+		logger.WithFields(log.Fields{
+			"project_id": projectID,
+			"error":      err.Error(),
+		}).Warn("Project has no contractor association in contractor_project table, skipping file deletion")
+		return allObjects, nil // Return empty list, no files to delete
+	}
+
+	// Get the contractor information to access bucket details
+	contractor, err := fs.contractorRepo.GetByID(ctx, contractorProject.ContractorId)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get contractor %d for project %d: %w", contractorProject.ContractorId, projectID, err)
 	}
 
 	// Get all sites for this project
@@ -233,10 +246,21 @@ func (fs *FileServiceImpl) GetSiteFiles(ctx context.Context, siteID int64) ([]dt
 		return nil, fmt.Errorf("failed to get project %d for site %d: %w", site.ProjectId, siteID, err)
 	}
 
-	// Get the contractor information to access bucket details
-	contractor, err := fs.contractorRepo.GetByID(ctx, project.ContractorId)
+	// Get contractor_id from contractor_project join table
+	contractorProject, err := fs.contractorProjectRepo.GetByProjectID(ctx, project.Id)
 	if err != nil {
-		return nil, fmt.Errorf("failed to get contractor %d for project %d: %w", project.ContractorId, project.Id, err)
+		logger.WithFields(log.Fields{
+			"site_id":    siteID,
+			"project_id": project.Id,
+			"error":      err.Error(),
+		}).Warn("Project has no contractor association in contractor_project table, skipping file deletion")
+		return allObjects, nil // Return empty list, no files to delete
+	}
+
+	// Get the contractor information to access bucket details
+	contractor, err := fs.contractorRepo.GetByID(ctx, contractorProject.ContractorId)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get contractor %d for project %d: %w", contractorProject.ContractorId, project.Id, err)
 	}
 
 	// Get all document groups for this site

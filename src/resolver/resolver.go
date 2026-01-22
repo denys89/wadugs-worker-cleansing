@@ -93,6 +93,11 @@ func (r *Resolver) ResolveFileService(ctx context.Context) (service.FileService,
 		return nil, fmt.Errorf("failed to resolve contractor repository: %w", err)
 	}
 
+	contractorProjectRepo, err := r.ResolveContractorProjectRepository(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("failed to resolve contractor project repository: %w", err)
+	}
+
 	projectRepo, err := r.ResolveProjectRepository(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("failed to resolve project repository: %w", err)
@@ -119,7 +124,7 @@ func (r *Resolver) ResolveFileService(ctx context.Context) (service.FileService,
 	}
 
 	// Create and return file service with all dependencies
-	fileService := service.NewFileService(contractorRepo, projectRepo, siteRepo, documentGroupRepo, documentRepo, fileRepo)
+	fileService := service.NewFileService(contractorRepo, contractorProjectRepo, projectRepo, siteRepo, documentGroupRepo, documentRepo, fileRepo)
 	log.Info("File service resolved successfully")
 
 	return fileService, nil
@@ -364,4 +369,13 @@ func (r *Resolver) ResolveFileRepository(ctx context.Context) (repository.FileRe
 		return nil, err
 	}
 	return repository.NewFileRepository(db), nil
+}
+
+// ResolveContractorProjectRepository creates and returns a contractor project repository
+func (r *Resolver) ResolveContractorProjectRepository(ctx context.Context) (repository.ContractorProjectRepository, error) {
+	db, err := r.ResolveDatabase(ctx)
+	if err != nil {
+		return nil, err
+	}
+	return repository.NewContractorProjectRepository(db), nil
 }

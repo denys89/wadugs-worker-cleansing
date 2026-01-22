@@ -44,9 +44,8 @@ type mockProjectRepository struct{}
 
 func (m *mockProjectRepository) GetByID(ctx context.Context, id int64) (*entity.Project, error) {
 	return &entity.Project{
-		Id:           id,
-		Name:         "Test Project",
-		ContractorId: 1,
+		Id:   id,
+		Name: "Test Project",
 	}, nil
 }
 

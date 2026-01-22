@@ -38,7 +38,12 @@ func (r *projectRepository) GetAll(ctx context.Context) (entity.Projects, error)
 
 func (r *projectRepository) GetByContractorID(ctx context.Context, contractorID int64) (entity.Projects, error) {
 	var projects entity.Projects
-	err := r.db.WithContext(ctx).Where("contractor_id = ?", contractorID).Find(&projects).Error
+	// Join with contractor_project table to find projects for this contractor
+	err := r.db.WithContext(ctx).
+		Table("project").
+		Joins("INNER JOIN contractor_project ON contractor_project.project_id = project.id").
+		Where("contractor_project.contractor_id = ?", contractorID).
+		Find(&projects).Error
 	if err != nil {
 		return nil, err
 	}
