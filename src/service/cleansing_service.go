@@ -124,12 +124,73 @@ func (cs *CleansingServiceImpl) DeleteContractorFiles(ctx context.Context, contr
 		return result, err
 	}
 
+	// =====================================================
+	// Database cascade deletion (bottom-up order)
+	// =====================================================
+	logger.WithField("contractor_id", contractorID).Info("Starting database cascade deletion for contractor")
+
+	// Get all projects for this contractor to cascade delete their related records
+	projects, err := cs.projectRepo.GetByContractorID(ctx, contractorID)
+	if err != nil {
+		logger.WithError(err).WithField("contractor_id", contractorID).Error("Failed to get projects for contractor")
+		result.Error = fmt.Sprintf("failed to get projects for contractor: %v", err)
+		result.FilesDeleted = deletedCount
+		return result, err
+	}
+
+	// For each project, get all sites and cascade delete
+	for _, project := range projects {
+		sites, err := cs.siteRepo.GetByProjectID(ctx, project.Id)
+		if err != nil {
+			logger.WithError(err).WithField("project_id", project.Id).Warn("Failed to get sites for project during cascade")
+			continue
+		}
+
+		for _, site := range sites {
+			// 1. Delete all files belonging to documents of this site
+			if err := cs.fileRepo.HardDeleteBySiteID(ctx, site.Id); err != nil {
+				logger.WithError(err).WithField("site_id", site.Id).Warn("Failed to delete file records for site")
+			}
+
+			// 2. Delete all documents belonging to document groups of this site
+			if err := cs.documentRepo.HardDeleteBySiteID(ctx, site.Id); err != nil {
+				logger.WithError(err).WithField("site_id", site.Id).Warn("Failed to delete document records for site")
+			}
+
+			// 3. Delete all document groups of this site
+			if err := cs.documentGroupRepo.HardDeleteBySiteID(ctx, site.Id); err != nil {
+				logger.WithError(err).WithField("site_id", site.Id).Warn("Failed to delete document group records for site")
+			}
+		}
+
+		// 4. Delete all sites of this project
+		if err := cs.siteRepo.HardDeleteByProjectID(ctx, project.Id); err != nil {
+			logger.WithError(err).WithField("project_id", project.Id).Warn("Failed to delete site records for project")
+		}
+	}
+
+	// 5. Delete all projects of this contractor
+	if err := cs.projectRepo.HardDeleteByContractorID(ctx, contractorID); err != nil {
+		logger.WithError(err).WithField("contractor_id", contractorID).Error("Failed to delete project records for contractor")
+		result.Error = fmt.Sprintf("failed to delete project records: %v", err)
+		result.FilesDeleted = deletedCount
+		return result, err
+	}
+
+	// 6. Delete the contractor itself
+	if err := cs.contractorRepo.Delete(ctx, contractorID); err != nil {
+		logger.WithError(err).WithField("contractor_id", contractorID).Error("Failed to delete contractor record")
+		result.Error = fmt.Sprintf("failed to delete contractor record: %v", err)
+		result.FilesDeleted = deletedCount
+		return result, err
+	}
+
 	result.Success = true
 	result.FilesDeleted = deletedCount
 	logger.WithFields(log.Fields{
 		"contractor_id": contractorID,
 		"files_deleted": deletedCount,
-	}).Info("Successfully deleted contractor files")
+	}).Info("Successfully deleted contractor files and database records")
 
 	return result, nil
 }
@@ -183,7 +244,6 @@ func (cs *CleansingServiceImpl) DeleteProjectFiles(ctx context.Context, projectI
 	}
 
 	// Calculate total file size for successfully deleted files
-	// Since all files were successfully deleted, we can use the full size
 	var totalSize int64
 	for _, obj := range s3Objects {
 		totalSize += obj.Size
@@ -195,7 +255,52 @@ func (cs *CleansingServiceImpl) DeleteProjectFiles(ctx context.Context, projectI
 			"project_id": projectID,
 			"total_size": totalSize,
 		}).Error("Failed to update project usage after successful deletion")
-		result.Error = fmt.Sprintf("failed to update project usage: %v", err)
+		// Continue with database cleanup even if usage update fails
+	}
+
+	// =====================================================
+	// Database cascade deletion (bottom-up order)
+	// =====================================================
+	logger.WithField("project_id", projectID).Info("Starting database cascade deletion for project")
+
+	// Get all sites for this project to cascade delete
+	sites, err := cs.siteRepo.GetByProjectID(ctx, projectID)
+	if err != nil {
+		logger.WithError(err).WithField("project_id", projectID).Error("Failed to get sites for project")
+		result.Error = fmt.Sprintf("failed to get sites for project: %v", err)
+		result.FilesDeleted = deletedCount
+		return result, err
+	}
+
+	for _, site := range sites {
+		// 1. Delete all files belonging to documents of this site
+		if err := cs.fileRepo.HardDeleteBySiteID(ctx, site.Id); err != nil {
+			logger.WithError(err).WithField("site_id", site.Id).Warn("Failed to delete file records for site")
+		}
+
+		// 2. Delete all documents belonging to document groups of this site
+		if err := cs.documentRepo.HardDeleteBySiteID(ctx, site.Id); err != nil {
+			logger.WithError(err).WithField("site_id", site.Id).Warn("Failed to delete document records for site")
+		}
+
+		// 3. Delete all document groups of this site
+		if err := cs.documentGroupRepo.HardDeleteBySiteID(ctx, site.Id); err != nil {
+			logger.WithError(err).WithField("site_id", site.Id).Warn("Failed to delete document group records for site")
+		}
+	}
+
+	// 4. Delete all sites of this project
+	if err := cs.siteRepo.HardDeleteByProjectID(ctx, projectID); err != nil {
+		logger.WithError(err).WithField("project_id", projectID).Error("Failed to delete site records for project")
+		result.Error = fmt.Sprintf("failed to delete site records: %v", err)
+		result.FilesDeleted = deletedCount
+		return result, err
+	}
+
+	// 5. Delete the project itself
+	if err := cs.projectRepo.HardDelete(ctx, projectID); err != nil {
+		logger.WithError(err).WithField("project_id", projectID).Error("Failed to delete project record")
+		result.Error = fmt.Sprintf("failed to delete project record: %v", err)
 		result.FilesDeleted = deletedCount
 		return result, err
 	}
@@ -206,7 +311,7 @@ func (cs *CleansingServiceImpl) DeleteProjectFiles(ctx context.Context, projectI
 		"project_id":    projectID,
 		"files_deleted": deletedCount,
 		"total_size":    totalSize,
-	}).Info("Successfully deleted project files")
+	}).Info("Successfully deleted project files and database records")
 
 	return result, nil
 }
