@@ -191,6 +191,27 @@ func (r *Resolver) ResolveCleansingService(ctx context.Context) service.Cleansin
 		return service.NewNullCleansingService()
 	}
 
+	// Create user_contractor repository
+	userContractorRepo, err := r.ResolveUserContractorRepository(ctx)
+	if err != nil {
+		log.WithError(err).Error("Failed to resolve user contractor repository, using null cleansing service")
+		return service.NewNullCleansingService()
+	}
+
+	// Create viewer_contractor repository
+	viewerContractorRepo, err := r.ResolveViewerContractorRepository(ctx)
+	if err != nil {
+		log.WithError(err).Error("Failed to resolve viewer contractor repository, using null cleansing service")
+		return service.NewNullCleansingService()
+	}
+
+	// Create contractor_project repository
+	contractorProjectRepo, err := r.ResolveContractorProjectRepository(ctx)
+	if err != nil {
+		log.WithError(err).Error("Failed to resolve contractor project repository, using null cleansing service")
+		return service.NewNullCleansingService()
+	}
+
 	// Create project repository
 	projectRepo, err := r.ResolveProjectRepository(ctx)
 	if err != nil {
@@ -230,6 +251,9 @@ func (r *Resolver) ResolveCleansingService(ctx context.Context) service.Cleansin
 	cleansingService := service.NewCleansingService(
 		s3Service,
 		contractorRepo,
+		userContractorRepo,
+		viewerContractorRepo,
+		contractorProjectRepo,
 		projectRepo,
 		siteRepo,
 		documentGroupRepo,
@@ -378,4 +402,22 @@ func (r *Resolver) ResolveContractorProjectRepository(ctx context.Context) (repo
 		return nil, err
 	}
 	return repository.NewContractorProjectRepository(db), nil
+}
+
+// ResolveUserContractorRepository creates and returns a user_contractor repository
+func (r *Resolver) ResolveUserContractorRepository(ctx context.Context) (repository.UserContractorRepository, error) {
+	db, err := r.ResolveDatabase(ctx)
+	if err != nil {
+		return nil, err
+	}
+	return repository.NewUserContractorRepository(db), nil
+}
+
+// ResolveViewerContractorRepository creates and returns a viewer_contractor repository
+func (r *Resolver) ResolveViewerContractorRepository(ctx context.Context) (repository.ViewerContractorRepository, error) {
+	db, err := r.ResolveDatabase(ctx)
+	if err != nil {
+		return nil, err
+	}
+	return repository.NewViewerContractorRepository(db), nil
 }

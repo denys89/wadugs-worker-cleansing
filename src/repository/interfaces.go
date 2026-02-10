@@ -14,6 +14,16 @@ type ContractorRepository interface {
 	Delete(ctx context.Context, id int64) error
 }
 
+// UserContractorRepository defines methods for user_contractor data access
+type UserContractorRepository interface {
+	HardDeleteByContractorID(ctx context.Context, contractorID int64) error
+}
+
+// ViewerContractorRepository defines methods for viewer_contractor data access
+type ViewerContractorRepository interface {
+	HardDeleteByContractorID(ctx context.Context, contractorID int64) error
+}
+
 // ProjectRepository defines methods for project data access
 type ProjectRepository interface {
 	GetByID(ctx context.Context, id int64) (*entity.Project, error)
@@ -23,6 +33,7 @@ type ProjectRepository interface {
 	UpdateProjectUsage(ctx context.Context, projectID int64, sizeDelta int64) error
 	HardDelete(ctx context.Context, id int64) error
 	HardDeleteByContractorID(ctx context.Context, contractorID int64) error
+	CleanupProjectAssociations(ctx context.Context, projectID int64) error
 }
 
 // SiteRepository defines methods for site data access

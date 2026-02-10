@@ -21,13 +21,16 @@ type (
 
 	// CleansingServiceImpl implements the CleansingService interface
 	CleansingServiceImpl struct {
-		s3Service         S3Service
-		contractorRepo    repository.ContractorRepository
-		projectRepo       repository.ProjectRepository
-		siteRepo          repository.SiteRepository
-		documentGroupRepo repository.DocumentGroupRepository
-		documentRepo      repository.DocumentRepository
-		fileRepo          repository.FileRepository
+		s3Service             S3Service
+		contractorRepo        repository.ContractorRepository
+		userContractorRepo    repository.UserContractorRepository
+		viewerContractorRepo  repository.ViewerContractorRepository
+		contractorProjectRepo repository.ContractorProjectRepository
+		projectRepo           repository.ProjectRepository
+		siteRepo              repository.SiteRepository
+		documentGroupRepo     repository.DocumentGroupRepository
+		documentRepo          repository.DocumentRepository
+		fileRepo              repository.FileRepository
 	}
 
 	// NullCleansingService is a no-op implementation for testing
@@ -38,6 +41,9 @@ type (
 func NewCleansingService(
 	s3Service S3Service,
 	contractorRepo repository.ContractorRepository,
+	userContractorRepo repository.UserContractorRepository,
+	viewerContractorRepo repository.ViewerContractorRepository,
+	contractorProjectRepo repository.ContractorProjectRepository,
 	projectRepo repository.ProjectRepository,
 	siteRepo repository.SiteRepository,
 	documentGroupRepo repository.DocumentGroupRepository,
@@ -45,13 +51,16 @@ func NewCleansingService(
 	fileRepo repository.FileRepository,
 ) CleansingService {
 	return &CleansingServiceImpl{
-		s3Service:         s3Service,
-		contractorRepo:    contractorRepo,
-		projectRepo:       projectRepo,
-		siteRepo:          siteRepo,
-		documentGroupRepo: documentGroupRepo,
-		documentRepo:      documentRepo,
-		fileRepo:          fileRepo,
+		s3Service:             s3Service,
+		contractorRepo:        contractorRepo,
+		userContractorRepo:    userContractorRepo,
+		viewerContractorRepo:  viewerContractorRepo,
+		contractorProjectRepo: contractorProjectRepo,
+		projectRepo:           projectRepo,
+		siteRepo:              siteRepo,
+		documentGroupRepo:     documentGroupRepo,
+		documentRepo:          documentRepo,
+		fileRepo:              fileRepo,
 	}
 }
 
@@ -167,17 +176,46 @@ func (cs *CleansingServiceImpl) DeleteContractorFiles(ctx context.Context, contr
 		if err := cs.siteRepo.HardDeleteByProjectID(ctx, project.Id); err != nil {
 			logger.WithError(err).WithField("project_id", project.Id).Warn("Failed to delete site records for project")
 		}
+
+		// 5. Delete FK-blocking association records for this project
+		if err := cs.projectRepo.CleanupProjectAssociations(ctx, project.Id); err != nil {
+			logger.WithError(err).WithField("project_id", project.Id).Warn("Failed to cleanup project associations")
+		}
 	}
 
-	// 5. Delete all projects of this contractor
-	if err := cs.projectRepo.HardDeleteByContractorID(ctx, contractorID); err != nil {
-		logger.WithError(err).WithField("contractor_id", contractorID).Error("Failed to delete project records for contractor")
-		result.Error = fmt.Sprintf("failed to delete project records: %v", err)
+	// 6. Delete all projects of this contractor
+	for _, project := range projects {
+		if err := cs.projectRepo.HardDelete(ctx, project.Id); err != nil {
+			logger.WithError(err).WithField("project_id", project.Id).Warn("Failed to delete project record")
+		}
+	}
+
+	// 6. Delete FK-blocking association records before deleting the contractor
+	// user_contractor has FK to contractor(id) without ON DELETE CASCADE
+	if err := cs.userContractorRepo.HardDeleteByContractorID(ctx, contractorID); err != nil {
+		logger.WithError(err).WithField("contractor_id", contractorID).Error("Failed to delete user_contractor records")
+		result.Error = fmt.Sprintf("failed to delete user_contractor records: %v", err)
 		result.FilesDeleted = deletedCount
 		return result, err
 	}
 
-	// 6. Delete the contractor itself
+	// viewer_contractor has FK to contractor(id) without ON DELETE CASCADE
+	if err := cs.viewerContractorRepo.HardDeleteByContractorID(ctx, contractorID); err != nil {
+		logger.WithError(err).WithField("contractor_id", contractorID).Error("Failed to delete viewer_contractor records")
+		result.Error = fmt.Sprintf("failed to delete viewer_contractor records: %v", err)
+		result.FilesDeleted = deletedCount
+		return result, err
+	}
+
+	// contractor_project has FK to contractor(id) without ON DELETE CASCADE
+	if err := cs.contractorProjectRepo.HardDeleteByContractorID(ctx, contractorID); err != nil {
+		logger.WithError(err).WithField("contractor_id", contractorID).Error("Failed to delete contractor_project records")
+		result.Error = fmt.Sprintf("failed to delete contractor_project records: %v", err)
+		result.FilesDeleted = deletedCount
+		return result, err
+	}
+
+	// 7. Delete the contractor itself (now safe - all FK references removed)
 	if err := cs.contractorRepo.Delete(ctx, contractorID); err != nil {
 		logger.WithError(err).WithField("contractor_id", contractorID).Error("Failed to delete contractor record")
 		result.Error = fmt.Sprintf("failed to delete contractor record: %v", err)
@@ -297,7 +335,16 @@ func (cs *CleansingServiceImpl) DeleteProjectFiles(ctx context.Context, projectI
 		return result, err
 	}
 
-	// 5. Delete the project itself
+	// 5. Delete FK-blocking association records before deleting the project
+	// client_project, uploader_project, vessel_project, contractor_project all have FKs to project(id)
+	if err := cs.projectRepo.CleanupProjectAssociations(ctx, projectID); err != nil {
+		logger.WithError(err).WithField("project_id", projectID).Error("Failed to cleanup project associations")
+		result.Error = fmt.Sprintf("failed to cleanup project associations: %v", err)
+		result.FilesDeleted = deletedCount
+		return result, err
+	}
+
+	// 6. Delete the project itself (now safe - all FK references removed)
 	if err := cs.projectRepo.HardDelete(ctx, projectID); err != nil {
 		logger.WithError(err).WithField("project_id", projectID).Error("Failed to delete project record")
 		result.Error = fmt.Sprintf("failed to delete project record: %v", err)

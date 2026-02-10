@@ -2,6 +2,7 @@ package repository
 
 import (
 	"context"
+	"fmt"
 
 	"github.com/denys89/wadugs-worker-cleansing/src/entity"
 	"gorm.io/gorm"
@@ -81,4 +82,31 @@ func (r *projectRepository) HardDeleteByContractorID(ctx context.Context, contra
 	return r.db.WithContext(ctx).
 		Exec("DELETE FROM project WHERE id IN (SELECT project_id FROM contractor_project WHERE contractor_id = ?)", contractorID).
 		Error
+}
+
+// CleanupProjectAssociations deletes all FK-blocking association records for a project
+// These tables have foreign keys referencing project(id) without ON DELETE CASCADE:
+// client_project, uploader_project, vessel_project, contractor_project
+func (r *projectRepository) CleanupProjectAssociations(ctx context.Context, projectID int64) error {
+	// Delete from client_project
+	if err := r.db.WithContext(ctx).Exec("DELETE FROM client_project WHERE project_id = ?", projectID).Error; err != nil {
+		return fmt.Errorf("failed to delete client_project records: %w", err)
+	}
+
+	// Delete from uploader_project
+	if err := r.db.WithContext(ctx).Exec("DELETE FROM uploader_project WHERE project_id = ?", projectID).Error; err != nil {
+		return fmt.Errorf("failed to delete uploader_project records: %w", err)
+	}
+
+	// Delete from vessel_project
+	if err := r.db.WithContext(ctx).Exec("DELETE FROM vessel_project WHERE project_id = ?", projectID).Error; err != nil {
+		return fmt.Errorf("failed to delete vessel_project records: %w", err)
+	}
+
+	// Delete from contractor_project
+	if err := r.db.WithContext(ctx).Exec("DELETE FROM contractor_project WHERE project_id = ?", projectID).Error; err != nil {
+		return fmt.Errorf("failed to delete contractor_project records: %w", err)
+	}
+
+	return nil
 }

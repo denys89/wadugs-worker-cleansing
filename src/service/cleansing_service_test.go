@@ -39,6 +39,35 @@ func (m *mockContractorRepository) GetByStatus(ctx context.Context, status int8)
 	return entity.Contractors{}, nil
 }
 
+// Mock user_contractor repository for testing
+type mockUserContractorRepository struct{}
+
+func (m *mockUserContractorRepository) HardDeleteByContractorID(ctx context.Context, contractorID int64) error {
+	return nil
+}
+
+// Mock viewer_contractor repository for testing
+type mockViewerContractorRepository struct{}
+
+func (m *mockViewerContractorRepository) HardDeleteByContractorID(ctx context.Context, contractorID int64) error {
+	return nil
+}
+
+// Mock contractor_project repository for testing
+type mockContractorProjectRepository struct{}
+
+func (m *mockContractorProjectRepository) GetByProjectID(ctx context.Context, projectID int64) (*entity.ContractorProject, error) {
+	return &entity.ContractorProject{}, nil
+}
+
+func (m *mockContractorProjectRepository) GetByContractorID(ctx context.Context, contractorID int64) (entity.ContractorProjects, error) {
+	return entity.ContractorProjects{}, nil
+}
+
+func (m *mockContractorProjectRepository) HardDeleteByContractorID(ctx context.Context, contractorID int64) error {
+	return nil
+}
+
 // Mock project repository for testing
 type mockProjectRepository struct{}
 
@@ -70,6 +99,10 @@ func (m *mockProjectRepository) HardDelete(ctx context.Context, id int64) error 
 }
 
 func (m *mockProjectRepository) HardDeleteByContractorID(ctx context.Context, contractorID int64) error {
+	return nil
+}
+
+func (m *mockProjectRepository) CleanupProjectAssociations(ctx context.Context, projectID int64) error {
 	return nil
 }
 
@@ -180,12 +213,15 @@ func (m *mockFileRepository) HardDeleteBySiteID(ctx context.Context, siteID int6
 func TestCleansingService_ProcessCleansingMessage(t *testing.T) {
 	s3Service := NewNullS3Service()
 	contractorRepo := &mockContractorRepository{}
+	userContractorRepo := &mockUserContractorRepository{}
+	viewerContractorRepo := &mockViewerContractorRepository{}
+	contractorProjectRepo := &mockContractorProjectRepository{}
 	projectRepo := &mockProjectRepository{}
 	siteRepo := &mockSiteRepository{}
 	docGroupRepo := &mockDocumentGroupRepository{}
 	docRepo := &mockDocumentRepository{}
 	fileRepo := &mockFileRepository{}
-	service := NewCleansingService(s3Service, contractorRepo, projectRepo, siteRepo, docGroupRepo, docRepo, fileRepo)
+	service := NewCleansingService(s3Service, contractorRepo, userContractorRepo, viewerContractorRepo, contractorProjectRepo, projectRepo, siteRepo, docGroupRepo, docRepo, fileRepo)
 
 	tests := []struct {
 		name    string
@@ -300,12 +336,15 @@ func TestCleansingService_ValidEntityID(t *testing.T) {
 func TestCleansingService_ErrorHandling(t *testing.T) {
 	s3Service := NewNullS3Service()
 	contractorRepo := &mockContractorRepository{}
+	userContractorRepo := &mockUserContractorRepository{}
+	viewerContractorRepo := &mockViewerContractorRepository{}
+	contractorProjectRepo := &mockContractorProjectRepository{}
 	projectRepo := &mockProjectRepository{}
 	siteRepo := &mockSiteRepository{}
 	docGroupRepo := &mockDocumentGroupRepository{}
 	docRepo := &mockDocumentRepository{}
 	fileRepo := &mockFileRepository{}
-	service := NewCleansingService(s3Service, contractorRepo, projectRepo, siteRepo, docGroupRepo, docRepo, fileRepo)
+	service := NewCleansingService(s3Service, contractorRepo, userContractorRepo, viewerContractorRepo, contractorProjectRepo, projectRepo, siteRepo, docGroupRepo, docRepo, fileRepo)
 
 	ctx := context.Background()
 
@@ -326,12 +365,15 @@ func TestCleansingService_ErrorHandling(t *testing.T) {
 func BenchmarkCleansingService_ProcessCleansingMessage(b *testing.B) {
 	s3Service := NewNullS3Service()
 	contractorRepo := &mockContractorRepository{}
+	userContractorRepo := &mockUserContractorRepository{}
+	viewerContractorRepo := &mockViewerContractorRepository{}
+	contractorProjectRepo := &mockContractorProjectRepository{}
 	projectRepo := &mockProjectRepository{}
 	siteRepo := &mockSiteRepository{}
 	docGroupRepo := &mockDocumentGroupRepository{}
 	docRepo := &mockDocumentRepository{}
 	fileRepo := &mockFileRepository{}
-	service := NewCleansingService(s3Service, contractorRepo, projectRepo, siteRepo, docGroupRepo, docRepo, fileRepo)
+	service := NewCleansingService(s3Service, contractorRepo, userContractorRepo, viewerContractorRepo, contractorProjectRepo, projectRepo, siteRepo, docGroupRepo, docRepo, fileRepo)
 	ctx := context.Background()
 	message := dto.CleansingMessage{Type: "contractor", ID: 123}
 

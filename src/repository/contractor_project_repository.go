@@ -11,6 +11,7 @@ import (
 type ContractorProjectRepository interface {
 	GetByProjectID(ctx context.Context, projectID int64) (*entity.ContractorProject, error)
 	GetByContractorID(ctx context.Context, contractorID int64) (entity.ContractorProjects, error)
+	HardDeleteByContractorID(ctx context.Context, contractorID int64) error
 }
 
 type contractorProjectRepository struct {
@@ -43,4 +44,9 @@ func (r *contractorProjectRepository) GetByContractorID(ctx context.Context, con
 		return nil, err
 	}
 	return contractorProjects, nil
+}
+
+// HardDeleteByContractorID permanently deletes all contractor_project records for a contractor
+func (r *contractorProjectRepository) HardDeleteByContractorID(ctx context.Context, contractorID int64) error {
+	return r.db.WithContext(ctx).Where("contractor_id = ?", contractorID).Delete(&entity.ContractorProject{}).Error
 }
